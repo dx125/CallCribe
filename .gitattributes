@@ -1,0 +1,13 @@
+# Normalize to LF in the repository, and check out per-file below.
+* text=auto
+
+# cmd.exe is genuinely picky about line endings in batch files, so these
+# must arrive as CRLF no matter how the person cloning has core.autocrlf
+# set. The PowerShell scripts follow the same convention for consistency.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+*.py  text eol=lf
+*.md  text eol=lf
+*.txt text eol=lf

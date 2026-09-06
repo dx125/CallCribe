@@ -1,0 +1,19 @@
+# CallCribe on an NVIDIA GPU (CUDA 12).
+#
+#     pip install -r requirements-gpu.txt
+#
+# About 700 MB of wheels, which is why this is a separate file: without a
+# GPU they are dead weight, and CallCribe runs fine on the CPU without them.
+#
+# CTranslate2 (the engine behind faster-whisper) needs cuDNN 9 on Windows.
+# These wheels drop their DLLs into site-packages/nvidia/*/bin, where
+# Windows does not look on its own — callcribe/cuda.py registers those
+# folders at startup. No system-wide CUDA toolkit install is required.
+#
+# If CUDA is missing or broken the app says so and transcribes on the CPU;
+# it does not refuse to start.
+
+-r requirements.txt
+
+nvidia-cublas-cu12
+nvidia-cudnn-cu12>=9.1,<10

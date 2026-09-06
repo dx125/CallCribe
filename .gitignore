@@ -1,0 +1,28 @@
+# --- Python ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# --- transcripts ---
+# Real call transcripts. Normally these land in %USERPROFILE%\call-transcripts,
+# but output_dir can be pointed anywhere, including inside the project.
+call-transcripts/
+*.md.bak
+
+# --- local, per-machine ---
+# settings.json normally lives in %APPDATA%\CallCribe. Ignored here too, in
+# case someone redirects it: it holds paths from one particular machine.
+settings.json
+*.lnk
+*.log
+
+# --- editors / OS ---
+.idea/
+.vs/
+.vscode/
+*.swp
+Thumbs.db
+desktop.ini
