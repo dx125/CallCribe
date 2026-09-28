@@ -102,7 +102,7 @@ Both accept flags that preset the window:
 |---|---|---|
 | `--lang` | `ru` `en` `es` `auto` | Speech language |
 | `--ui-lang` | `en` `ru` | Interface language |
-| `--model` | a size name or a folder path | Whisper model |
+| `--model` | a size name, a Hugging Face repo id, or a folder path | Whisper model |
 
 None of them are required — everything is switchable inside the window. They
 just supply a different starting value instead of the saved one, and behave
@@ -134,6 +134,9 @@ point CallCribe at the folder:
 2. Copy the folder across.
 3. Pick it with **Browse...** in the **Model:** dropdown, or start with
    `run.cmd --model "D:\models\faster-whisper-large-v3"`.
+
+On a machine that *is* allowed online once, step 1 and 2 collapse into naming
+the repository directly: `run.cmd --model Systran/faster-whisper-large-v3`.
 
 The choice is remembered, so this is a one-time step. See
 [Choosing a model](#choosing-a-model) for what makes a folder valid.
@@ -217,7 +220,7 @@ wins, from `settings.json` (see [Where your choices are stored](#where-your-choi
 | Setting | Default | Why change it |
 |---|---|---|
 | `whisper_device` | `auto` | Force `cuda` / `cpu`. `auto` takes the GPU when there is one and falls back to the CPU by itself |
-| `whisper_model` | `large-v3` | First-launch model: a size name or a folder path. Changed live in the window, see [Choosing a model](#choosing-a-model) |
+| `whisper_model` | `large-v3` | First-launch model: a size name, a Hugging Face repo id, or a folder path. Changed live in the window, see [Choosing a model](#choosing-a-model) |
 | `cpu_fallback_model` | `large-v3-turbo` | What to use **at startup** when there is no usable GPU. On the CPU everything is dominated by a fixed per-call cost — `large-v3` ~3.1 s, turbo ~2.6 s, with a six times smaller slope. On the 2–5 s phrases a conversation is made of, `large-v3` falls behind real time and turbo keeps up. This substitution never applies to a model you picked in the window — that one loads as asked |
 | `ui_language` | `en` | First-launch interface language: `en` or `ru`. Unrelated to the speech language |
 | `language` | `ru` | First-launch **speech** language — switchable live, see [Choosing a language](#choosing-a-language). `None` means auto-detect. **Change this if you do not transcribe Russian**, or just pick another one in the window |
@@ -294,6 +297,13 @@ plus **Browse...** for a model folder on disk.
 ```
 tiny · base · small · medium · large-v2 · large-v3 · large-v3-turbo · distil-large-v3
 ```
+
+A **Hugging Face repo id** works too, anywhere a model name is accepted —
+`--model deepdml/faster-whisper-large-v3-turbo-ct2` downloads that specific
+conversion into the same cache. Repo ids are remembered like browsed folders
+and show up in the dropdown next time, listed by their last part, with the
+organization added if two of them collide. Anything else containing a slash is
+treated as a path, so an existing folder named `org/model` stays a folder.
 
 Not any folder will do: it must be a model **converted to CTranslate2**, not
 the original OpenAI `.pt`. The app checks the folder before loading and

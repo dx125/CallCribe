@@ -222,8 +222,17 @@ DEFAULT_PROMPTS: dict[str | None, str] = {
 }
 
 
-@dataclass
+@dataclass(frozen=True)
 class Config:
+    """Снимок настроек, раздаваемый потокам только на чтение.
+
+    frozen — это и есть тот контракт, о котором говорит LanguageSetting:
+    менять на ходу можно ровно то, что вынесено в отдельные объекты
+    (LanguageSetting, ModelSetting), а конфигурацию — нельзя. Новые
+    значения получают через dataclasses.replace(), то есть новым объектом;
+    так уже работают и __main__, и load_settings.
+    """
+
     # --- аудио ---
     sample_rate_target: int = 16_000
     frame_ms: int = 30            # webrtcvad принимает только 10 / 20 / 30
@@ -389,6 +398,11 @@ class Config:
         warnings: list[str] = []
         if self.frame_ms not in (10, 20, 30):
             warnings.append(t("cfg.frame_ms", value=self.frame_ms))
+        # Кадр webrtcvad задаётся парой (частота, длина), и обе половины он
+        # проверяет сам — отказом на КАЖДОМ кадре. Раз про длину кадра здесь
+        # уже предупреждаем, умалчивать про частоту незачем.
+        if self.sample_rate_target not in (8_000, 16_000, 32_000, 48_000):
+            warnings.append(t("cfg.sample_rate", value=self.sample_rate_target))
         if not 0 <= self.vad_aggressiveness <= 3:
             warnings.append(t("cfg.vad_aggressiveness", value=self.vad_aggressiveness))
         if self.language not in LANGUAGE_CODES:

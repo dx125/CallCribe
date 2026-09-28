@@ -148,6 +148,14 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "[{label}] audio processing errors: {error}",
         "ru": "[{label}] ошибки обработки звука: {error}",
     },
+    "vad.crashed": {
+        "en": "[{label}] speech segmentation stopped and this channel is now "
+              "silent — nothing from it will reach the transcript. Restart "
+              "CallCribe. {error}",
+        "ru": "[{label}] сегментация речи остановилась, и канал замолчал — "
+              "в расшифровку с него больше ничего не попадёт. Перезапустите "
+              "CallCribe. {error}",
+    },
 
     # --- распознавание ---------------------------------------------------
     "asr.no_cuda": {
@@ -244,6 +252,12 @@ MESSAGES: dict[str, dict[str, str]] = {
     "cfg.frame_ms": {
         "en": "frame_ms={value}: webrtcvad only accepts 10/20/30 ms",
         "ru": "frame_ms={value}: webrtcvad принимает только 10/20/30 мс",
+    },
+    "cfg.sample_rate": {
+        "en": "sample_rate_target={value}: webrtcvad only accepts "
+              "8000/16000/32000/48000 Hz",
+        "ru": "sample_rate_target={value}: webrtcvad принимает только "
+              "8000/16000/32000/48000 Гц",
     },
     "cfg.vad_aggressiveness": {
         "en": "vad_aggressiveness={value}: allowed range is 0..3",

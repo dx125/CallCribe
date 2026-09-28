@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import os
 import queue
 import sys
 import threading
@@ -789,6 +790,7 @@ def test_settings() -> None:
         MAX_CUSTOM_MODELS,
         Settings,
         SettingsStore,
+        is_repo_id,
         model_display,
         model_labels,
         model_problem,
@@ -916,6 +918,56 @@ def test_settings() -> None:
               problem is not None and problem[0] == "model.not_a_dir",
               problem[0] if problem else "принят")
 
+        # --- имена репозиториев Hugging Face -----------------------------
+        # Третий вид имени: faster-whisper скачивает такие сам, и проверять
+        # их как папку нельзя — именно это и отвергало ровно те сборки,
+        # которые названы в README как офлайн-вариант.
+        repo = "Systran/faster-whisper-large-v3"
+        check("имя репозитория опознано", is_repo_id(repo))
+        check("имя репозитория не проверяется как папка",
+              model_problem(repo) is None,
+              str(model_problem(repo)))
+        check("от репозитория в списке остаётся его имя",
+              model_display(repo) == "faster-whisper-large-v3",
+              model_display(repo))
+
+        # Путь остаётся путём, даже когда на репозиторий он похож:
+        # проверка существования на диске идёт последней именно за этим.
+        # Без неё относительная папка "org/model" уехала бы на Hugging Face.
+        (root / "org" / "model").mkdir(parents=True)
+        for name in ("model.bin", "config.json", "tokenizer.json"):
+            (root / "org" / "model" / name).write_text("x", encoding="utf-8")
+        here = os.getcwd()
+        os.chdir(root)
+        try:
+            check("существующая папка со слэшем — не репозиторий",
+                  not is_repo_id("org/model"))
+            check("и принимается как папка модели",
+                  model_problem("org/model") is None,
+                  str(model_problem("org/model")))
+        finally:
+            os.chdir(here)
+
+        for path_like in (r"D:\models\faster-whisper-large-v3",
+                          "C:/models/faster-whisper-large-v3",
+                          str(good)):
+            check(f"путь не принят за репозиторий: {path_like}",
+                  not is_repo_id(path_like))
+
+        # Две сборки одной модели у разных организаций — различать их
+        # должна как раз организация, она же и единственное отличие.
+        rivals = [repo, "deepdml/faster-whisper-large-v3"]
+        labels = model_labels(rivals)
+        check("одноимённые репозитории различимы по организации",
+              len(labels) == 2 and set(labels.values()) == set(rivals),
+              " | ".join(labels))
+
+        data = Settings()
+        data.remember_model(repo)
+        check("репозиторий попадает в историю выбора",
+              data.custom_models == [repo],
+              str(data.custom_models))
+
         # --- подписи для выпадающего списка ------------------------------
         check("имя размера остаётся именем размера",
               model_display("large-v3") == "large-v3")
@@ -930,6 +982,15 @@ def test_settings() -> None:
         check("совпавшие имена папок различимы в списке",
               len(labels) == 3 and set(labels.values()) == {"large-v3", *twins},
               " | ".join(labels))
+
+        # Родителя у имени размера нет, и если оно столкнётся вторым, в
+        # подписи не должно появиться пустых скобок. В самом приложении
+        # размеры идут первыми и до этого не доходит — проверка на то,
+        # чтобы подписи не зависели от порядка списка.
+        shuffled = model_labels([*twins, "large-v3"])
+        check("подпись не зависит от порядка и не пустеет в скобках",
+              len(shuffled) == 3 and not any("()" in name for name in shuffled),
+              " | ".join(shuffled))
 
         # --- история выбранных папок --------------------------------------
         data = Settings()
@@ -1268,7 +1329,14 @@ def test_devices() -> None:
 
         from callcribe.audio import describe, get_loopback_device, get_mic_device
     except ImportError as exc:
-        check("pyaudiowpatch установлен", False, str(exc))
+        # Колеса нет и быть не может нигде, кроме Windows: это не отказ
+        # кода, а площадка, на которой эту часть не проверить. А вот на
+        # Windows его отсутствие — настоящая недостача, там приложение без
+        # него попросту не запустится, и молчать об этом нельзя.
+        if sys.platform == "win32":
+            check("pyaudiowpatch установлен", False, str(exc))
+        else:
+            warn("захват звука не проверить — нужна Windows", str(exc))
         return
 
     pa = pyaudio.PyAudio()
@@ -1300,10 +1368,26 @@ def test_dual_capture() -> None:
     источником оба отказа невидимы, так что тест обязан быть именно на двух.
     """
     section("Два источника одновременно")
-    import pyaudiowpatch as pyaudio
+    # Импорт под защитой, ровно как в test_devices: без колеса (или не на
+    # Windows) проверка обязана дать честный FAIL и отдать управление
+    # дальше. Незащищённый импорт здесь уносил с собой и проверку CUDA, и
+    # итоговый счёт — то есть ломал отчёт целиком там, где не хватало
+    # одной зависимости.
+    try:
+        import pyaudiowpatch as pyaudio
 
-    from callcribe.audio import AudioCapture, get_loopback_device, get_mic_device
-    from callcribe.status import INFO, Notifier
+        from callcribe.audio import AudioCapture, get_loopback_device, get_mic_device
+        from callcribe.status import INFO, Notifier
+    except ImportError as exc:
+        # Колеса нет и быть не может нигде, кроме Windows: это не отказ
+        # кода, а площадка, на которой эту часть не проверить. А вот на
+        # Windows его отсутствие — настоящая недостача, там приложение без
+        # него попросту не запустится, и молчать об этом нельзя.
+        if sys.platform == "win32":
+            check("pyaudiowpatch установлен", False, str(exc))
+        else:
+            warn("захват звука не проверить — нужна Windows", str(exc))
+        return
 
     cfg = Config()
     pa = pyaudio.PyAudio()

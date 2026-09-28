@@ -43,16 +43,58 @@ def default_path() -> Path:
     return root / "CallCribe" / "settings.json"
 
 
+def _last_part(value: str) -> str:
+    """Последняя часть пути или имени репозитория — по любому разделителю.
+
+    Своего Path() здесь не хватает: на не-Windows "\\" разделителем он не
+    считает, и от "D:\\models\\large-v3" в подписи оставалось всё целиком.
+    Приложение живёт на Windows, так что в бою это не всплывало, — но
+    selftest гоняют где угодно, и проверка подписи падала там не по делу.
+    """
+    return value.replace("\\", "/").rstrip("/").rpartition("/")[2]
+
+
+def _parent_part(value: str) -> str:
+    """Имя родительской папки (для репозитория — организации). См. _last_part."""
+    head = value.replace("\\", "/").rstrip("/").rpartition("/")[0]
+    return head.rstrip("/").rpartition("/")[2]
+
+
+def is_builtin_model(value: str) -> bool:
+    """Имя размера из WHISPER_MODELS — то, что faster-whisper скачает сам."""
+    return value in WHISPER_MODELS
+
+
+def is_repo_id(value: str) -> bool:
+    """Имя репозитория на Hugging Face: "Systran/faster-whisper-large-v3".
+
+    Третий вид имени, наравне с размером и папкой: faster-whisper принимает
+    его сам и кладёт в тот же кэш. Раньше всё, что не размер, считалось
+    папкой, и такое имя отвергалось как «не папка» — при том что работать
+    оно обязано, а в офлайн-разделе README сами эти репозитории и названы.
+
+    Отличаем от пути консервативно: ровно один "/", ни "\\", ни ":" (диск),
+    и на диске такого нет. Существующая папка "models/large-v3" остаётся
+    папкой — проверка существования идёт последней именно за этим.
+    """
+    if "\\" in value or ":" in value or value.count("/") != 1:
+        return False
+    org, _, name = value.partition("/")
+    if not org or not name or org in (".", ".."):
+        return False
+    return not Path(value).exists()
+
+
 def is_local_model(value: str) -> bool:
-    """Путь к папке, а не имя размера вроде large-v3."""
-    return value not in WHISPER_MODELS
+    """Путь к папке — всё, что не имя размера и не имя репозитория."""
+    return not is_builtin_model(value) and not is_repo_id(value)
 
 
 def model_problem(value: str) -> Problem | None:
     """Чего не хватает в папке, чтобы faster-whisper её принял.
 
-    Имена размеров не проверяем: их библиотека скачивает сама, и судить
-    об их годности отсюда нечем.
+    Имена размеров и репозиториев не проверяем: их библиотека скачивает
+    сама, и судить об их годности отсюда нечем.
     """
     if not is_local_model(value):
         return None
@@ -73,12 +115,14 @@ def model_display(value: str) -> str:
     """Короткая подпись для выпадающего списка.
 
     Полный путь в список ставить нельзя: он шире окна, и список
-    превращается в горизонтальную простыню.
+    превращается в горизонтальную простыню. С именами репозиториев то же
+    самое, и последняя часть у них ровно так же опознаваема — а если две
+    сборки называются одинаково, их разведёт model_labels(), подставив
+    организацию, то есть как раз то, чем они и различаются.
     """
-    if not is_local_model(value):
+    if is_builtin_model(value):
         return value
-    path = Path(value)
-    return path.name or value
+    return _last_part(value) or value
 
 
 def model_labels(values: list[str]) -> dict[str, str]:
@@ -94,7 +138,13 @@ def model_labels(values: list[str]) -> dict[str, str]:
         base = model_display(value)
         name = base
         if name in labels:
-            name = f"{base} ({Path(value).parent.name})"
+            # Родителя может не быть вовсе — у голого имени размера его нет,
+            # и подпись выходила бы «large-v3 ()». Сейчас до этого не
+            # доходит: имена размеров идут первыми и забирают простую
+            # подпись себе. Но держаться это не должно на порядке списка,
+            # поэтому пустого родителя просто пропускаем — ниже номер.
+            parent = _parent_part(value)
+            name = f"{base} ({parent})" if parent else base
         suffix = 2
         while name in labels:
             name = f"{base} ({suffix})"
@@ -125,8 +175,13 @@ class Settings:
         }
 
     def remember_model(self, value: str) -> None:
-        """Поставить папку в начало истории, без повторов."""
-        if not is_local_model(value):
+        """Поставить выбранное имя в начало истории, без повторов.
+
+        Размеры помнить не нужно — они и так в списке всегда. А папки и
+        репозитории нужно: иначе выбранное ключом --model имя из окна
+        больше не выбрать.
+        """
+        if is_builtin_model(value):
             return
         remaining = [item for item in self.custom_models if item != value]
         self.custom_models = [value, *remaining][:MAX_CUSTOM_MODELS]

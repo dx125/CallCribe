@@ -3,15 +3,27 @@
 from __future__ import annotations
 
 import queue
+import sys
 import threading
 from collections import deque
+from typing import TYPE_CHECKING
 
 import numpy as np
 import webrtcvad
 
-from .audio import AudioCapture
 from .config import Config
+from .i18n import speaker, t
 from .models import Utterance
+from .status import Notifier
+
+if TYPE_CHECKING:          # pragma: no cover - только для аннотации ниже
+    from .audio import AudioCapture
+
+# Источник звука нужен сегментатору двумя своими полями — label и
+# out_queue, — поэтому импорт только для типизации. Иначе разбор этого
+# модуля тянет за собой audio.py, а с ним pyaudiowpatch, которого нет
+# нигде, кроме Windows: сегментация — чистая арифметика над массивами,
+# и запирать её проверку на одной платформе незачем.
 
 
 class VadSegmenter(threading.Thread):
@@ -29,11 +41,12 @@ class VadSegmenter(threading.Thread):
 
     def __init__(
         self,
-        capture: AudioCapture,
+        capture: "AudioCapture",
         cfg: Config,
         transcribe_queue: "queue.Queue[Utterance]",
         stop_event: threading.Event,
         pause_event: threading.Event,
+        notifier: Notifier | None = None,
     ):
         super().__init__(daemon=True, name=f"vad-{capture.label}")
         self.capture = capture
@@ -41,6 +54,9 @@ class VadSegmenter(threading.Thread):
         self.transcribe_queue = transcribe_queue
         self.stop_event = stop_event
         self.pause_event = pause_event
+        # None — жаловаться некуда (так гоняется selftest): тогда отказ
+        # уходит в stderr, а не в окно.
+        self.notifier = notifier
 
         self.vad = webrtcvad.Vad(cfg.vad_aggressiveness)
         self.frame_len = cfg.frame_len
@@ -74,7 +90,10 @@ class VadSegmenter(threading.Thread):
             audio = np.concatenate(payload)
             duration_ms = len(audio) / self.cfg.sample_rate_target * 1000
             if duration_ms >= self.cfg.min_utterance_ms:
-                self.transcribe_queue.put(Utterance(self.capture.label, self.start_ts, audio))
+                self.transcribe_queue.put(Utterance(
+                    self.capture.label, self.start_ts, audio,
+                    self.cfg.sample_rate_target,
+                ))
 
         tail = self.voiced[-keep_tail:] if keep_tail else []
         emitted = len(self.voiced) - len(tail)
@@ -125,6 +144,30 @@ class VadSegmenter(threading.Thread):
     # ------------------------------------------------------------------
 
     def run(self) -> None:
+        """Обёртка над циклом: сегментация не имеет права умереть молча.
+
+        Соседние потоки свои отказы уже переживают — захват считает ошибки
+        колбэка, распознавание ловит сбой на каждой фразе. Здесь же любое
+        исключение (webrtcvad не принял частоту или длину кадра, кончилась
+        память) уносило поток целиком: фразы больше не появляются никогда,
+        а окно продолжает бодро показывать «слушаю». Под pythonw, которым
+        приложение и запускается ярлыком, трассировка уходит в никуда, так
+        что снаружи это выглядит как «ничего не происходит, ошибок нет».
+        """
+        try:
+            self._loop()
+        except Exception as exc:
+            text = t(
+                "vad.crashed",
+                label=speaker(self.capture.label),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            if self.notifier is not None:
+                self.notifier.fatal(text)
+            else:
+                print(text, file=sys.stderr, flush=True)
+
+    def _loop(self) -> None:
         was_paused = False
 
         while True:

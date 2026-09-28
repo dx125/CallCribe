@@ -6,12 +6,12 @@
 # pulls this file in, so it is one command, not two.
 
 # --- core ---
-faster-whisper>=1.1.0
-numpy>=1.26
-PyAudioWPatch>=0.2.12.7
-webrtcvad-wheels>=2.0.14
+faster-whisper>=1.1.0,<2
+numpy>=1.26,<3
+PyAudioWPatch>=0.2.12.7,<0.3
+webrtcvad-wheels>=2.0.14,<3
 
 # --- anti-aliased resampling ---
 # Without soxr the app still runs, but falls back to a plain numpy
 # resampler (see callcribe/resample.py) and says so at startup.
-soxr>=0.5.0
+soxr>=0.5.0,<1

@@ -6,6 +6,7 @@ import dataclasses
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import messagebox
 
@@ -129,7 +130,10 @@ def run(
             sources[label] = t("app.no_device")
             continue
         capture = AudioCapture(device, label, cfg, stop_event, pause_event, notifier)
-        threads += [capture, VadSegmenter(capture, cfg, transcribe_q, stop_event, pause_event)]
+        threads += [
+            capture,
+            VadSegmenter(capture, cfg, transcribe_q, stop_event, pause_event, notifier),
+        ]
         sources[label] = device["name"]
 
     worker = TranscriberWorker(
@@ -157,8 +161,15 @@ def run(
 
     # Даём распознаванию дожевать очередь: строки уже пишутся на диск
     # по мере готовности, даже когда окна больше нет.
+    #
+    # Бюджет один на всех, а не по 30 с на поток: своя пауза у каждого из
+    # пяти означала бы до двух с половиной минут окна, которого уже нет на
+    # экране. Ждать тут по-настоящему стоит только распознавание, поэтому
+    # оно и стоит в очереди последним — остальные уходят за десятые доли
+    # секунды и его времени не отнимают.
+    deadline = time.monotonic() + 30
     for thread in threads:
-        thread.join(timeout=30)
+        thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
     path = writer.finalize()
     if path:

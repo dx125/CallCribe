@@ -30,7 +30,7 @@ from .config import (
 from .cuda import cuda_device_count, missing_cuda_libraries, prepare_cuda_dll_path
 from .i18n import t
 from .models import Line, Utterance
-from .settings import is_local_model, model_display
+from .settings import is_builtin_model, model_display
 from .status import Notifier
 from .transcript import TranscriptWriter
 
@@ -127,12 +127,13 @@ class TranscriberWorker(threading.Thread):
         # после первой опоздавшей фразы.
         #
         # Только на старте (cpu_fallback задан) и только для имени размера:
-        # выбранную вручную папку подменять нечем, да и выбрана она явно.
+        # выбранную вручную папку или репозиторий подменять нечем, да и
+        # выбраны они явно.
         if (
             cpu_fallback
             and device == "cpu"
             and model_name != cpu_fallback
-            and not is_local_model(model_name)
+            and is_builtin_model(model_name)
         ):
             self.notifier.warn(t(
                 "asr.cpu_model_swap",
