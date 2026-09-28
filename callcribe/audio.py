@@ -114,6 +114,48 @@ def get_loopback_device(p: "pyaudio.PyAudio") -> dict:
     raise RuntimeError(t("audio.no_loopback", device=speakers["name"]))
 
 
+def get_loopback_devices(p: "pyaudio.PyAudio") -> list[dict]:
+    """Все выводы звука, какие есть в системе, — «всё, что слышно».
+
+    Вывод по умолчанию идёт ПЕРВЫМ, и порядок здесь не косметика: на нём
+    одном держится разговор, поэтому не открывшийся первый вывод — отказ, а
+    не пропуск одного из многих (см. app._pick_devices). Остальные — это
+    вторая гарнитура, HDMI монитора, виртуальный кабель: звук, который
+    человек слышит, но который мимо устройства по умолчанию не проходит.
+
+    Дубли отбрасываем по индексу, и это не аккуратность, а необходимость:
+    вывод по умолчанию приходит дважды — из defaultOutputDevice и из
+    перечисления. Захватив его двумя потоками, мы получим КАЖДУЮ фразу
+    двумя одинаковыми строками, то есть ровно то, что README называет самой
+    частой ложной тревогой («текст задвоился»).
+
+    Если вывода по умолчанию нет или его loopback не опознан, это больше не
+    отказ старта: перечисление всё равно может дать рабочие устройства, и
+    слушать их полезнее, чем не запуститься. Пусто — вот это отказ.
+    """
+    devices: list[dict] = []
+    seen: set[int] = set()
+
+    try:
+        default = get_loopback_device(p)
+    except RuntimeError:
+        default = None
+    if default is not None:
+        devices.append(default)
+        seen.add(int(default["index"]))
+
+    for loopback in p.get_loopback_device_info_generator():
+        index = int(loopback["index"])
+        if index in seen:
+            continue
+        seen.add(index)
+        devices.append(loopback)
+
+    if not devices:
+        raise RuntimeError(t("audio.no_loopback_any"))
+    return devices
+
+
 def describe(device: dict) -> str:
     rate = int(device.get("defaultSampleRate", 0))
     channels = int(device.get("maxInputChannels", 0))
@@ -143,8 +185,14 @@ class AudioCapture(threading.Thread):
         stop_event: threading.Event,
         pause_event: threading.Event,
         notifier: Notifier,
+        required: bool = True,
     ):
         super().__init__(daemon=True, name=f"capture-{label}")
+        # required=False — это «один из многих выводов»: не открылся, значит
+        # его и не слушаем, остальные продолжают работать. Модальное окно на
+        # каждый такой вывод превратило бы запуск с четырьмя устройствами в
+        # четыре щелчка по «ОК».
+        self.required = required
         self.device = device
         self.label = label
         self.cfg = cfg
@@ -215,9 +263,15 @@ class AudioCapture(threading.Thread):
                 )
                 stream.start_stream()
         except Exception as exc:
-            self.notifier.fatal(
-                t("audio.open_failed", label=speaker(self.label), error=exc)
-            )
+            if self.required:
+                self.notifier.fatal(
+                    t("audio.open_failed", label=speaker(self.label), error=exc)
+                )
+            else:
+                self.notifier.warn(t(
+                    "audio.open_failed_extra",
+                    device=self.device["name"], error=exc,
+                ))
             # started выставить обязаны в любом случае: иначе тот, кто ждёт
             # старта источника, будет ждать его до таймаута впустую.
             try:

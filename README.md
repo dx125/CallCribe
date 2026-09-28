@@ -162,7 +162,7 @@ back to defaults. To return to what is written in `config.py`, delete it.
 ## How it works
 
 ```
-Microphone                  System audio (loopback)
+Microphone                  System audio (loopback, one per output device)
     │                                │
     ▼                                ▼
 AudioCapture                    AudioCapture          one thread per source:
@@ -438,11 +438,21 @@ the CPU the app warns in the status line.
   same text. With `show_speaker_labels=False` they are indistinguishable in the
   file and look like a bug; turn the labels on and you will see it is `Me` and
   `Them`, i.e. echo.
-- **Loopback captures all system audio**, not just the call: music, a browser
-  video, notifications — everything lands in the transcript. That is what the
-  **Pause** button is for.
+- **Every audio output is captured**, and everything they play, not just the
+  call: music, a browser video, notifications all land in the transcript. Each
+  output gets its own capture thread — speakers, a second headset, a monitor
+  over HDMI — so nothing you can hear is missed. That is what the **Pause**
+  button is for. Two consequences worth knowing: each extra output adds load
+  to the single transcription thread, so on a CPU-only machine several active
+  outputs can make it fall behind (the status line says so, and a lighter
+  model fixes it); and if two of your outputs carry the *same* sound — a
+  virtual cable mirroring the speakers, say — that audio is transcribed once
+  per output. Only the default output is required; any other that fails to
+  open is reported as a warning and skipped.
 - **No diarization.** In a group call the entire far side is one `Them`
-  channel, with no separation into individual participants.
+  channel, with no separation into individual participants. Multiple outputs
+  share that one label too: the transcript stays two-sided no matter how many
+  devices are being listened to. The window's bottom line names them all.
 - **One language per phrase.** The dropdown switches recognition as a whole; a
   phrase where someone switches from Russian to English mid-sentence is parsed
   as monolingual. Auto does not help — it detects per phrase, not per part.

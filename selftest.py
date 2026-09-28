@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib.util
 import io
 import os
 import queue
 import sys
 import threading
 import time
+import types
 from collections import Counter
 
 import numpy as np
@@ -1322,6 +1324,100 @@ def test_duplicates() -> None:
     )
 
 
+class _FakeOutputs:
+    """PyAudio ровно настолько, насколько нужен get_loopback_devices()."""
+
+    def __init__(self, devices: dict, default_index: int, loopbacks: list):
+        self._devices = devices
+        self._default = default_index
+        self._loopbacks = loopbacks
+
+    def get_host_api_info_by_type(self, _type):
+        return {"defaultOutputDevice": self._default}
+
+    def get_device_info_by_index(self, index):
+        return self._devices[index]
+
+    def get_loopback_device_info_generator(self):
+        return iter(self._loopbacks)
+
+
+def _dev(index: int, name: str, loopback: bool = False) -> dict:
+    return {"index": index, "name": name, "isLoopbackDevice": loopback,
+            "defaultSampleRate": 48_000.0, "maxInputChannels": 2}
+
+
+def test_outputs() -> None:
+    """Перечисление выводов: все, какие есть, и ни один дважды.
+
+    Проверяется на заглушке, а не на живой машине: набор устройств у
+    каждого свой, а отбрасывание дублей — чистая арифметика, и падать она
+    не должна нигде. Заглушка стоит и вместо pyaudiowpatch, если колеса
+    нет: без неё этот модуль вообще не импортировать, а проверять его
+    только на Windows незачем.
+    """
+    section("Выводы звука")
+
+    installed = False
+    # find_spec, а не import в try: спрашиваем «есть ли колесо», а не
+    # «дай его сюда», и ни одного неиспользуемого имени не заводим.
+    if importlib.util.find_spec("pyaudiowpatch") is None:
+        stub = types.ModuleType("pyaudiowpatch")
+        stub.paWASAPI = 13
+        stub.paInt16, stub.paComplete, stub.paContinue = 8, 1, 0
+        stub.PyAudio = object
+        sys.modules["pyaudiowpatch"] = stub
+        installed = True
+
+    try:
+        audio = importlib.import_module("callcribe.audio")
+
+        # Вывод по умолчанию — обычное устройство, его loopback лежит в
+        # перечислении рядом с остальными. Самый частый расклад.
+        speakers = _dev(0, "Speakers")
+        listing = [_dev(10, "Speakers [Loopback]"), _dev(11, "Headset [Loopback]"),
+                   _dev(12, "HDMI [Loopback]")]
+        found = audio.get_loopback_devices(
+            _FakeOutputs({0: speakers}, 0, listing))
+        check("слушаются все выводы, а не один",
+              [d["index"] for d in found] == [10, 11, 12],
+              str([d["index"] for d in found]))
+        check("вывод по умолчанию идёт первым — он обязательный",
+              found[0]["index"] == 10, str(found[0]["index"]))
+        check("дубль вывода по умолчанию отброшен",
+              len({d["index"] for d in found}) == len(found),
+              f"устройств {len(found)}, уникальных {len({d['index'] for d in found})}")
+
+        # Устройство по умолчанию само себе loopback — приходит и напрямую,
+        # и из перечисления. Захватить его дважды значит задвоить каждую
+        # строку расшифровки.
+        direct = _dev(5, "Speakers [Loopback]", loopback=True)
+        found = audio.get_loopback_devices(
+            _FakeOutputs({5: direct}, 5, [direct, _dev(6, "Headset [Loopback]")]))
+        check("loopback по умолчанию не захвачен дважды",
+              [d["index"] for d in found] == [5, 6],
+              str([d["index"] for d in found]))
+
+        # Вывода по умолчанию нет вовсе — это больше не отказ старта:
+        # слушать то, что нашлось, полезнее, чем не запуститься.
+        found = audio.get_loopback_devices(
+            _FakeOutputs({}, -1, [_dev(10, "HDMI [Loopback]")]))
+        check("без вывода по умолчанию берём то, что нашлось",
+              [d["index"] for d in found] == [10],
+              str([d["index"] for d in found]))
+
+        # А вот когда нет ничего — слушать действительно нечего.
+        try:
+            audio.get_loopback_devices(_FakeOutputs({}, -1, []))
+            check("пустая система — отказ", False, "исключения не было")
+        except RuntimeError as exc:
+            check("пустая система — отказ", True, str(exc).splitlines()[0])
+    finally:
+        if installed:
+            sys.modules.pop("pyaudiowpatch", None)
+            sys.modules.pop("callcribe.audio", None)
+
+
 def test_devices() -> None:
     section("Аудиоустройства")
     try:
@@ -1590,6 +1686,7 @@ def main() -> int:
     test_model_switch()
     test_vad()
     test_duplicates()
+    test_outputs()
     test_devices()
     test_dual_capture()
     test_cuda()

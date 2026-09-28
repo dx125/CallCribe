@@ -76,6 +76,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "system audio (loopback): {device}",
         "ru": "системный звук (loopback): {device}",
     },
+    "app.loopback_extra": {
+        "en": "also listening to: {device}",
+        "ru": "слушаю также: {device}",
+    },
     "app.mic": {"en": "microphone: {device}", "ru": "микрофон: {device}"},
     "app.mic_unavailable": {
         "en": "microphone unavailable, recording the other side only. {error}",
@@ -139,6 +143,19 @@ MESSAGES: dict[str, dict[str, str]] = {
     "audio.open_failed": {
         "en": "[{label}] could not open the audio stream: {error}",
         "ru": "[{label}] не удалось открыть аудиопоток: {error}",
+    },
+    "audio.open_failed_extra": {
+        "en": "could not listen to {device}, skipping it — the other outputs "
+              "are unaffected. {error}",
+        "ru": "не удалось слушать {device}, пропускаю — на остальные выводы "
+              "это не влияет. {error}",
+    },
+    "audio.no_loopback_any": {
+        "en": "Not a single audio output was found in the system, so there is "
+              "nothing to listen to.\n\n"
+              "Check: Settings -> System -> Sound -> Output.",
+        "ru": "В системе не нашлось ни одного вывода звука — слушать нечего."
+              "\n\nПроверьте: Параметры -> Система -> Звук -> Вывод.",
     },
     "audio.stopped": {
         "en": "[{label}] capture stopped — the device was unplugged or switched.",

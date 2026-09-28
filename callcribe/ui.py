@@ -49,7 +49,7 @@ class TranscriptWindow:
         stop_event: threading.Event,
         pause_event: threading.Event,
         worker: TranscriberWorker,
-        sources: dict[str, str],
+        sources: list[tuple[str, str]],
         language: LanguageSetting | None = None,
         model: ModelSetting | None = None,
         store: SettingsStore | None = None,
@@ -190,13 +190,20 @@ class TranscriptWindow:
         self.ui_language_var.set(ui_language_name(self._ui_language()))
 
         self._rebuild_model_choices()
-        self.sources_label.configure(
-            text=" · ".join(
-                f"{speaker(label)}: {name}" for label, name in self.sources.items()
-            )
-        )
+        self.sources_label.configure(text=self._sources_text())
         self._transient_until = 0.0
         self._refresh_status()
+
+    def _sources_text(self) -> str:
+        """Откуда берётся звук. Устройства сгруппированы по метке: выводов
+        бывает несколько, и «Собеседник: ... · Собеседник: ...» повторяет
+        подпись там, где хватит перечисления."""
+        grouped: dict[str, list[str]] = {}
+        for label, name in self.sources:
+            grouped.setdefault(label, []).append(name)
+        return " · ".join(
+            f"{speaker(label)}: {', '.join(names)}" for label, names in grouped.items()
+        )
 
     def _ui_language(self) -> str:
         return self.store.data.ui_language if self.store else self.cfg.ui_language

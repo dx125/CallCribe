@@ -13,7 +13,7 @@ from tkinter import messagebox
 import pyaudiowpatch as pyaudio
 
 from .asr import TranscriberWorker
-from .audio import AudioCapture, describe, get_loopback_device, get_mic_device
+from .audio import AudioCapture, describe, get_loopback_devices, get_mic_device
 from .config import CFG, Config, LanguageSetting, ModelSetting, language_name
 from .i18n import set_language, t, ui_language_name
 from .models import Line, Utterance
@@ -38,21 +38,21 @@ def _show_startup_error(message: str) -> None:
     root.destroy()
 
 
-def _pick_devices(notifier: Notifier) -> tuple[dict | None, dict]:
-    """Loopback обязателен, микрофон — нет.
+def _pick_devices(notifier: Notifier) -> tuple[dict | None, list[dict]]:
+    """Хотя бы один вывод обязателен, микрофон — нет.
 
     Без микрофона запись половины разговора всё равно полезнее, чем отказ
     стартовать: гарнитуру часто подключают уже после запуска.
     """
     pa = pyaudio.PyAudio()
     try:
-        loopback = get_loopback_device(pa)   # без него смысла нет — пусть падает
+        loopbacks = get_loopback_devices(pa)   # без них смысла нет — пусть падает
         try:
             mic = get_mic_device(pa)
         except Exception as exc:
             notifier.warn(t("app.mic_unavailable", error=exc))
             mic = None
-        return mic, loopback
+        return mic, loopbacks
     finally:
         pa.terminate()
 
@@ -99,12 +99,14 @@ def run(
         notifier.warn(t("app.no_soxr"))
 
     try:
-        mic_device, loop_device = _pick_devices(notifier)
+        mic_device, loop_devices = _pick_devices(notifier)
     except Exception as exc:
         _show_startup_error(str(exc))
         sys.exit(1)
 
-    notifier.info(t("app.loopback", device=describe(loop_device)))
+    notifier.info(t("app.loopback", device=describe(loop_devices[0])))
+    for extra in loop_devices[1:]:
+        notifier.info(t("app.loopback_extra", device=describe(extra)))
     if mic_device is not None:
         notifier.info(t("app.mic", device=describe(mic_device)))
     notifier.info(t("app.interface_language", language=ui_language_name(cfg.ui_language)))
@@ -123,18 +125,33 @@ def run(
 
     writer = TranscriptWriter(cfg)
     threads: list[threading.Thread] = []
-    sources: dict[str, str] = {}
+    # Список, а не словарь по метке: выводов теперь сколько угодно, и все они
+    # идут под одной меткой — свести их в словарь значит потерять все, кроме
+    # последнего. Метка остаётся одна на всю дальнюю сторону сознательно:
+    # разделение говорящих в задачи v1 не входит, и звук с двух гарнитур
+    # относится к разговору ровно так же, как с одной.
+    sources: list[tuple[str, str]] = []
 
-    for device, label in ((mic_device, MIC_LABEL), (loop_device, LOOPBACK_LABEL)):
-        if device is None:
-            sources[label] = t("app.no_device")
-            continue
-        capture = AudioCapture(device, label, cfg, stop_event, pause_event, notifier)
+    # Обязателен только первый вывод — на нём разговор. Микрофон, если он
+    # вообще нашёлся, тоже обязателен: не открывшийся микрофон при живом
+    # устройстве — это поломка, а не второй монитор с HDMI-звуком.
+    channels: list[tuple[dict, str, bool]] = []
+    if mic_device is None:
+        sources.append((MIC_LABEL, t("app.no_device")))
+    else:
+        channels.append((mic_device, MIC_LABEL, True))
+    for position, device in enumerate(loop_devices):
+        channels.append((device, LOOPBACK_LABEL, position == 0))
+
+    for device, label, required in channels:
+        capture = AudioCapture(
+            device, label, cfg, stop_event, pause_event, notifier, required=required
+        )
         threads += [
             capture,
             VadSegmenter(capture, cfg, transcribe_q, stop_event, pause_event, notifier),
         ]
-        sources[label] = device["name"]
+        sources.append((label, device["name"]))
 
     worker = TranscriberWorker(
         cfg, transcribe_q, gui_q, stop_event, notifier, writer, language, model
