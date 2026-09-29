@@ -478,6 +478,89 @@ def _drain(notifier) -> list[tuple[str, str]]:
             out.append((notice.level, notice.text))
 
 
+def _drain_all(notifier) -> list[str]:
+    """Всё, что сказал notifier, включая info: _drain() их отбрасывает, а
+    выбор формата вычислений объявляется именно info."""
+    out = []
+    while True:
+        try:
+            out.append(notifier.queue.get_nowait().text)
+        except queue.Empty:
+            return out
+
+
+def test_compute() -> None:
+    """Формат вычислений: берём поддержанный, а не желаемый.
+
+    Ровно здесь приложение и исчезало без следа на GTX 1050 Ti. float16
+    требует вычислительной способности 7.0, у Pascal её нет, а запрос
+    отсутствующего формата — не отказ загрузки, а access violation внутри
+    конструктора модели: ни исключения, ни строки в логе, просто нет окна.
+    """
+    section("Формат вычислений")
+    import dataclasses
+
+    import callcribe.asr as asr_module
+
+    worker, _setting, notifier = _switch_worker("large-v3")
+    saved = asr_module.supported_compute_types
+    pascal = frozenset({"int8", "int8_float32", "float32"})
+    modern = frozenset({"float16", "int8_float16", "int8", "int8_float32", "float32"})
+
+    def resolve(device: str, wanted: str = "") -> str:
+        worker.cfg = dataclasses.replace(worker.cfg, whisper_compute=wanted)
+        _drain_all(notifier)
+        quiet = contextlib.redirect_stderr(io.StringIO())
+        with quiet, contextlib.redirect_stdout(io.StringIO()):
+            return worker._resolve_compute(device)
+
+    try:
+        # --- старая карта: float16 нет ---------------------------------
+        asr_module.supported_compute_types = lambda device: pascal
+        chosen = resolve("cuda")
+        said = _drain_all(notifier)
+        check("без float16 берём int8-формат, а не падаем",
+              chosen == "int8_float32", chosen)
+        check("и объясняем, почему не float16",
+              any("float16" in m and "7.0" in m for m in said),
+              said[-1] if said else "ни слова")
+
+        # Явный float16 на такой карте — тот самый роковой запрос.
+        chosen = resolve("cuda", "float16")
+        said = _drain_all(notifier)
+        check("явный float16 на Pascal подменяется, а не исполняется",
+              chosen == "int8_float32", chosen)
+        check("о подмене предупреждают",
+              any("float16" in m and "int8_float32" in m for m in said),
+              said[-1] if said else "ни слова")
+
+        # --- карта посвежее --------------------------------------------
+        asr_module.supported_compute_types = lambda device: modern
+        chosen = resolve("cuda")
+        said = _drain_all(notifier)
+        check("где float16 есть, его и берём", chosen == "float16", chosen)
+        check("и молчат — подменять нечего", not said, "; ".join(said))
+        check("поддержанный выбор руками уважают",
+              resolve("cuda", "int8_float32") == "int8_float32")
+
+        # --- CPU --------------------------------------------------------
+        asr_module.supported_compute_types = lambda device: frozenset(
+            {"int8", "int8_float32", "float32", "int16"})
+        check("на CPU по-прежнему int8", resolve("cpu") == "int8")
+
+        # --- спросить не у кого ------------------------------------------
+        # Прежнее поведение: гадать вслепую хуже, чем не менять ничего.
+        asr_module.supported_compute_types = lambda device: frozenset()
+        check("без ответа от CTranslate2 остаёмся на прежнем — cuda",
+              resolve("cuda") == "float16")
+        check("без ответа от CTranslate2 остаёмся на прежнем — cpu",
+              resolve("cpu") == "int8")
+        check("и явный выбор в этом случае проходит как есть",
+              resolve("cuda", "bfloat16") == "bfloat16")
+    finally:
+        asr_module.supported_compute_types = saved
+
+
 def test_model_switch() -> None:
     """Смена модели на ходу: заявка из окна, работа — в потоке модели."""
     section("Смена модели")
@@ -1684,6 +1767,7 @@ def main() -> int:
     test_languages()
     test_language_routing()
     test_model_switch()
+    test_compute()
     test_vad()
     test_duplicates()
     test_outputs()

@@ -103,6 +103,8 @@ Both accept flags that preset the window:
 | `--lang` | `ru` `en` `es` `auto` | Speech language |
 | `--ui-lang` | `en` `ru` | Interface language |
 | `--model` | a size name, a Hugging Face repo id, or a folder path | Whisper model |
+| `--device` | `auto` `cuda` `cpu` | Where to run |
+| `--compute` | `auto` `int8` `int8_float32` `float16` `float32` … | Compute type |
 
 None of them are required — everything is switchable inside the window. They
 just supply a different starting value instead of the saved one, and behave
@@ -523,6 +525,24 @@ system plays. Use **Pause**.
 **Nothing at all appears, no errors.** Run `run.cmd` instead of the shortcut
 and read the console; then `selftest.py`, which will tell you whether the
 devices were found and where the model landed.
+
+**It exits right after "loading ..." with code -1073741819.** That is
+`0xC0000005`, an access violation inside the CUDA stack — a native crash, so
+there is no Python traceback and nothing in the window. Two causes, both on
+the GPU side:
+
+- **The card cannot do `float16`.** CTranslate2 needs compute capability 7.0,
+  and Pascal cards (GTX 10xx) are 6.1. CallCribe asks CTranslate2 what the
+  device supports and picks the best available, so this should not happen by
+  itself — but if you forced the type with `--compute float16`, drop the flag.
+- **Not enough free VRAM.** Check `nvidia-smi`: a 4 GB card with a browser and
+  a few Electron apps open can have under 1.5 GB free, while `large-v3-turbo`
+  needs about 1.6 GB at `float16`. Close things, or use `--compute int8_float32`
+  to roughly halve the weights.
+
+`--device cpu` sidesteps the GPU entirely and is a perfectly good answer on a
+small or busy card — `large-v3-turbo` is chosen for CPU precisely because it
+keeps pace with a conversation there.
 
 ## Roadmap (v2+)
 

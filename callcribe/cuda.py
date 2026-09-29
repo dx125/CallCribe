@@ -84,6 +84,27 @@ def cuda_device_count() -> int:
         return 0
 
 
+def supported_compute_types(device: str) -> frozenset[str]:
+    """Форматы вычислений, которые CTranslate2 умеет здесь и сейчас.
+
+    Пустое множество — спросить не удалось (нет ctranslate2, нет
+    устройства); тогда решать приходится вслепую, см. asr._resolve_compute.
+
+    Вопрос этот отделяет «модель загрузится медленнее» от «процесс
+    исчезнет»: float16 требует вычислительной способности 7.0, и на Pascal
+    (GTX 10xx) его просто нет. Запрос отсутствующего формата CTranslate2 не
+    отклоняет — он падает access violation'ом внутри конструктора модели,
+    мимо любого except, и окно закрывается без единой строки в логе.
+    """
+    prepare_cuda_dll_path()
+    try:
+        import ctranslate2
+
+        return frozenset(ctranslate2.get_supported_compute_types(device))
+    except Exception:
+        return frozenset()
+
+
 # Библиотеки, которые CTranslate2 подгружает уже во время счёта, а не при
 # загрузке модели. Внутри группы достаточно любой: имя содержит мажорную
 # версию, и при переезде на следующую CUDA соседнее имя избавит от ложного

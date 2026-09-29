@@ -183,6 +183,18 @@ MESSAGES: dict[str, dict[str, str]] = {
     },
     # Драйвер и библиотеки счёта — разные вещи, и разойтись они могут
     # запросто; сообщение должно назвать и то, чего не хватает, и команду.
+    "asr.compute_unsupported": {
+        "en": "{compute} is not supported on {device} here — using {chosen} "
+              "instead. Available: {available}",
+        "ru": "{compute} на {device} здесь не поддерживается — беру {chosen}. "
+              "Доступно: {available}",
+    },
+    "asr.compute_fallback": {
+        "en": "this GPU has no float16 (compute capability below 7.0) — "
+              "using {chosen}",
+        "ru": "float16 у этой видеокарты нет (вычислительная способность ниже "
+              "7.0) — беру {chosen}",
+    },
     "asr.cuda_libs_missing": {
         "en": "CUDA compute libraries are missing ({libraries}): the GPU driver is "
               "there, but every phrase would fail on them. Fix with: "
@@ -448,6 +460,18 @@ MESSAGES: dict[str, dict[str, str]] = {
               "(default: the saved one)",
         "ru": "модель whisper: имя размера или путь к папке faster-whisper "
               "(по умолчанию — сохранённая)",
+    },
+    "cli.device_help": {
+        "en": "where to run: auto (default), cuda or cpu. Use cpu when the GPU "
+              "misbehaves",
+        "ru": "где считать: auto (по умолчанию), cuda или cpu. cpu — когда с "
+              "видеокартой что-то не так",
+    },
+    "cli.compute_help": {
+        "en": "compute type (default: auto — the best one this machine "
+              "supports). int8_float32 fits an older or a busy GPU",
+        "ru": "формат вычислений (по умолчанию auto — лучший из доступных на "
+              "этой машине). int8_float32 подходит старой или занятой видеокарте",
     },
     "cli.windows_only": {
         "en": "CallCribe only runs on Windows: system audio is captured through "

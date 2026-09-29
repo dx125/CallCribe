@@ -7,7 +7,7 @@ import dataclasses
 import sys
 
 from .app import load_settings, run
-from .config import CFG, LANGUAGE_CODES
+from .config import CFG, COMPUTE_TYPES, LANGUAGE_CODES, WHISPER_DEVICES
 from .i18n import UI_LANGUAGE_CODES, set_language, t
 from .settings import model_problem
 from .status import use_utf8_console
@@ -28,6 +28,8 @@ def main() -> None:
     parser.add_argument("--lang", choices=_LANG_ARGS, help=t("cli.lang_help"))
     parser.add_argument("--ui-lang", choices=UI_LANGUAGE_CODES, help=t("cli.ui_lang_help"))
     parser.add_argument("--model", metavar="NAME|PATH", help=t("cli.model_help"))
+    parser.add_argument("--device", choices=WHISPER_DEVICES, help=t("cli.device_help"))
+    parser.add_argument("--compute", choices=COMPUTE_TYPES, help=t("cli.compute_help"))
     args = parser.parse_args()
 
     # Разбор аргументов раньше проверки платформы: --help должен работать
@@ -52,11 +54,20 @@ def main() -> None:
         store.data.remember_model(args.model)
         store.data.whisper_model = args.model
 
+    # Устройство и формат вычислений, в отличие от языков и модели, в файл
+    # настроек не едут: это свойства машины, а не выбор человека, и меняют
+    # их когда что-то пошло не так. Пусть влияют на один запуск.
+    compute = cfg.whisper_compute
+    if args.compute:
+        compute = "" if args.compute == _AUTO_ARG else args.compute
+
     cfg = dataclasses.replace(
         cfg,
         ui_language=store.data.ui_language,
         language=store.data.language,
         whisper_model=store.data.whisper_model,
+        whisper_device=args.device or cfg.whisper_device,
+        whisper_compute=compute,
     )
     run(cfg, store, problems)
 

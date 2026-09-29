@@ -27,7 +27,12 @@ from .config import (
     ModelSetting,
     language_name,
 )
-from .cuda import cuda_device_count, missing_cuda_libraries, prepare_cuda_dll_path
+from .cuda import (
+    cuda_device_count,
+    missing_cuda_libraries,
+    prepare_cuda_dll_path,
+    supported_compute_types,
+)
 from .i18n import t
 from .models import Line, Utterance
 from .settings import is_builtin_model, model_display
@@ -37,6 +42,18 @@ from .transcript import TranscriptWriter
 # Глубина очереди, после которой имеет смысл сказать пользователю,
 # что распознавание отстаёт от разговора.
 _LAG_WARN_ITEMS = 6
+
+# Что брать, когда формат не задан руками, — в порядке предпочтения.
+# Первый поддержанный и побеждает.
+#
+# На cuda первым стоит float16: он вдвое легче по памяти и быстрее всего
+# там, где вообще есть. Дальше идут форматы с int8-весами — они и на старых
+# картах работают, и в скромную видеопамять влезают, а это на четырёх
+# гигабайтах, из которых половину занял браузер, решает.
+_COMPUTE_PREFERENCE: dict[str, tuple[str, ...]] = {
+    "cuda": ("float16", "int8_float16", "int8_float32", "float32"),
+    "cpu": ("int8", "int8_float32", "float32"),
+}
 
 
 class TranscriberWorker(threading.Thread):
@@ -103,8 +120,43 @@ class TranscriberWorker(threading.Thread):
                 if requested == "auto":
                     device = "cpu"
 
-        compute = self.cfg.whisper_compute or ("float16" if device == "cuda" else "int8")
-        return device, compute
+        return device, self._resolve_compute(device)
+
+    def _resolve_compute(self, device: str) -> str:
+        """Формат вычислений, который эта машина действительно умеет.
+
+        «На cuda всегда float16» было предположением ценой в процесс: на
+        Pascal этого формата нет, и модель не отказывалась грузиться, а
+        уносила приложение целиком (см. cuda.supported_compute_types).
+        Поэтому спрашиваем, а не предполагаем.
+        """
+        supported = supported_compute_types(device)
+        wanted = self.cfg.whisper_compute
+
+        # Спросить не у кого — остаёмся на прежнем поведении: выдумывать
+        # тут нечего, а менять его вслепую не лучше, чем не менять.
+        if not supported:
+            return wanted or ("float16" if device == "cuda" else "int8")
+
+        if wanted and wanted in supported:
+            return wanted
+
+        chosen = next(
+            (name for name in _COMPUTE_PREFERENCE.get(device, ()) if name in supported),
+            sorted(supported)[0],
+        )
+        if wanted:
+            # Явный выбор здесь всё же подменяем — в отличие от выбора
+            # устройства. Разница в цене ошибки: неподдержанное устройство
+            # работает медленно, неподдержанный формат не работает вовсе.
+            self.notifier.warn(t(
+                "asr.compute_unsupported",
+                compute=wanted, device=device, chosen=chosen,
+                available=", ".join(sorted(supported)),
+            ))
+        elif device == "cuda" and chosen != "float16":
+            self.notifier.info(t("asr.compute_fallback", chosen=chosen))
+        return chosen
 
     def _build_model(self, model_name: str, cpu_fallback: str | None):
         """Загрузить модель. Возвращает (модель, имя, подпись устройства).
