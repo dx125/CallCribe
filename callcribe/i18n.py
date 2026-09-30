@@ -407,6 +407,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ru": "Ошибка — см. окно с сообщением",
     },
     "ui.copied": {"en": "Copied to the clipboard", "ru": "Скопировано в буфер обмена"},
+    # Кнопка у фразы под курсором. Коротко: она стоит поверх текста и не
+    # должна закрывать больше, чем нужно.
+    "ui.copy_message": {"en": "Copy", "ru": "Копировать"},
+    "ui.message_copied": {"en": "✓ Copied", "ru": "✓ Скопировано"},
     "ui.nothing_to_copy": {"en": "Nothing to copy", "ru": "Нечего копировать"},
     "ui.cleared": {
         "en": "Window cleared (the file on disk is untouched)",

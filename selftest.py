@@ -1850,6 +1850,126 @@ def test_device_setting() -> None:
     check("устройство берётся из выбора в окне", resolved == "cpu", resolved)
 
 
+def test_copy_message() -> None:
+    """Кнопка «копировать» у фразы под курсором.
+
+    Настоящее окно Tk, только за краем экрана: подсветка и место кнопки
+    считаются по геометрии строк, а у неотрисованного окна её нет.
+    """
+    section("Копирование одной фразы")
+    try:
+        import tkinter as tk
+    except ImportError:
+        warn("проверка окна пропущена", "нет tkinter")
+        return
+
+    from callcribe.config import DeviceSetting, LanguageSetting, ModelSetting
+    from callcribe.i18n import get_language, set_language
+    from callcribe.models import Line
+    from callcribe.status import Notifier
+    from callcribe.ui import _HOVER_TAG, TranscriptWindow
+
+    class _Worker:
+        ready, failed, loading = threading.Event(), threading.Event(), threading.Event()
+        loading_name, device_label = "", "large-v3 · cpu/int8"
+        device_setting = None
+
+    saved_language = get_language()
+    set_language("en")
+    try:
+        cfg = Config(window_geometry="760x520+-3000+0")
+        gui_q: queue.Queue = queue.Queue()
+        window = TranscriptWindow(
+            cfg=cfg, gui_queue=gui_q, transcribe_queue=queue.Queue(),
+            notifier=Notifier(), stop_event=threading.Event(),
+            pause_event=threading.Event(), worker=_Worker(), sources=[],
+            language=LanguageSetting("ru"), model=ModelSetting("large-v3"),
+            device=DeviceSetting("cpu"),
+        )
+    except tk.TclError as exc:
+        set_language(saved_language)
+        warn("проверка окна пропущена", f"нет дисплея: {exc}")
+        return
+
+    root = window.root
+    # Настоящий буфер обмена не трогаем: selftest запускают на рабочей
+    # машине, и затёртая им картинка из буфера — не та цена за проверку.
+    clipboard: list[str] = []
+    root.clipboard_clear = clipboard.clear
+    root.clipboard_append = clipboard.append
+    root.clipboard_get = lambda: "".join(clipboard)
+
+    try:
+        spoken = [
+            "Первая фраза.",
+            # Нарочно длинная: переносится, и первая строка упирается в
+            # правый край — туда, где встаёт кнопка.
+            "Вторая фраза, её и копируем, и она нарочно длинная, чтобы перенестись "
+            "на следующую строку и упереться в правый край окна.",
+            "Третья.",
+        ]
+        for offset, text in enumerate(spoken):
+            gui_q.put(Line(1_700_000_000.0 + offset, "them", text))
+        root.update()
+        window._drain_lines()
+        root.update()
+        check("у каждой фразы свой тег", len(window._messages) == 3, str(len(window._messages)))
+
+        second = f"msg-{window._message_seq - 1}"
+        x, y, _w, h = window.text.bbox(f"{second}.first")
+        window._hover(window._message_at(f"@{x + 2},{y + h // 2}"))
+        root.update()
+        check("курсор над фразой — она и выбрана", window._hovered == second, str(window._hovered))
+        highlighted = window.text.tag_ranges(_HOVER_TAG)
+        own = window.text.tag_ranges(second)
+        check("подсвечена ровно эта фраза",
+              [str(i) for i in highlighted] == [str(i) for i in own], str(highlighted))
+        button = window.copy_message_button
+        check("кнопка появилась", bool(button.winfo_ismapped()))
+        line_x, _ly, line_width, _lh, _base = window.text.dlineinfo(f"{second}.first")
+        check("текст переносится до кнопки, а не уходит под неё",
+              line_x + line_width <= button.winfo_x(),
+              f"строка до x={line_x + line_width}, кнопка с x={button.winfo_x()}")
+        check("на уровне этой фразы, у правого края",
+              abs(button.winfo_y() + button.winfo_height() / 2 - (y + h / 2)) <= h
+              and button.winfo_x() + button.winfo_width() >= window.text.winfo_width() - 10,
+              f"кнопка y={button.winfo_y()}, строка y={y}")
+
+        # Промежуток между фразами — ни одной. Пустая строка — сразу за
+        # последним символом фразы и её переводом строки.
+        gap = window.text.bbox(f"{second}.last +1c")
+        check("пустая строка между фразами — не фраза",
+              gap is not None
+              and window._message_at(f"@{gap[0] + 2},{gap[1] + gap[3] // 2}") is None,
+              str(gap))
+
+        button.invoke()
+        root.update()
+        check("копируется сказанное, без метки времени",
+              root.clipboard_get() == spoken[1], repr(root.clipboard_get()))
+        check("кнопка подтверждает", button.cget("text") == "✓ Copied", button.cget("text"))
+
+        window._hover(None)
+        root.update()
+        check("курсор ушёл — кнопки и подсветки нет",
+              not button.winfo_ismapped() and not window.text.tag_ranges(_HOVER_TAG))
+
+        set_language("ru")
+        window._apply_texts()
+        window._hover(second)
+        check("подпись кнопки следует за языком интерфейса",
+              button.cget("text") == "Копировать", button.cget("text"))
+
+        window.clear_text()
+        root.update()
+        check("«Очистить» забывает фразы и прячет кнопку",
+              not window._messages and not button.winfo_ismapped())
+    finally:
+        window._closing = True
+        root.destroy()
+        set_language(saved_language)
+
+
 class _StubCapture(threading.Thread):
     """Захват без звуковой карты: открывается (или нет) и живёт, пока не
     остановят — или пока тест не «выдернет устройство»."""
@@ -2284,6 +2404,7 @@ def main() -> int:
     test_dual_capture()
     test_capture_supervisor()
     test_crash_handling()
+    test_copy_message()
     test_cuda()
     if args.load_model:
         test_model_load()

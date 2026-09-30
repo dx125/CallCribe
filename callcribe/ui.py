@@ -8,6 +8,7 @@ import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
+from tkinter import font as tkfont
 
 from . import diagnostics
 from .asr import TranscriberWorker
@@ -37,6 +38,9 @@ from .status import FATAL, INFO, WARN, Notice, Notifier
 _POLL_MS = 100
 _MAX_DRAIN = 50          # строк за один тик, чтобы не подвесить GUI
 _TRANSIENT_MS = 4000     # сколько держать временное сообщение в статусе
+_MESSAGE_TAG = "msg-"    # префикс тега каждой фразы в тексте
+_HOVER_TAG = "hover"     # подсветка фразы под курсором
+_MESSAGE_BODY_TAG = "message"   # общий для всех фраз: поле справа под кнопку
 
 
 class TranscriptWindow:
@@ -190,6 +194,29 @@ class TranscriptWindow:
         self.text.bind("<Control-a>", self._select_all)
         self.text.bind("<Control-A>", self._select_all)
 
+        # --- «копировать» у фразы под курсором ----------------------------
+        # Одна кнопка на всё окно, а не по кнопке в каждой фразе: за звонок
+        # фраз набираются сотни, а встроенный виджет на каждую — это сотни
+        # живых окон Tk ради того, что в каждый момент видна одна.
+        # Кнопка — дочерняя у самого Text и ставится поверх него place(),
+        # поэтому прокрутку и перенос строк не трогает.
+        self._messages: dict[str, str] = {}   # тег фразы -> её текст
+        self._message_seq = 0
+        self._hovered: str | None = None
+        self.text.tag_configure(_HOVER_TAG, background="#eef3fb")
+        # Выделение должно оставаться видимым и поверх подсветки фразы.
+        self.text.tag_raise("sel")
+        self.copy_message_button = tk.Button(
+            self.text, relief="flat", bd=0, padx=6, pady=0, cursor="hand2",
+            font=("Segoe UI", 8), bg="#dfe8f6", activebackground="#c9d8f0",
+            command=self._copy_hovered,
+        )
+        self.text.bind("<Motion>", self._on_text_motion)
+        self.text.bind("<Leave>", self._on_text_leave)
+        self.text.bind("<MouseWheel>", lambda _e: self.root.after_idle(self._refresh_hover))
+        self.text.bind("<Configure>", lambda _e: self._refresh_hover())
+        self.copy_message_button.bind("<Leave>", self._on_text_leave)
+
         self._apply_texts()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(_POLL_MS, self.poll)
@@ -207,6 +234,13 @@ class TranscriptWindow:
         """
         self.root.title(t("ui.title"))
         self.copy_button.configure(text=t("ui.copy_all"))
+        self.copy_message_button.configure(text=t("ui.copy_message"))
+        # Справа у фраз — поле шириной в кнопку: текст переносится до неё, а
+        # не уходит под неё. Ширина — по самой длинной из двух подписей и на
+        # текущем языке («Копировать» вдвое шире «Copy»).
+        font = tkfont.Font(font=self.copy_message_button.cget("font"))
+        caption = max(font.measure(t("ui.copy_message")), font.measure(t("ui.message_copied")))
+        self.text.tag_configure(_MESSAGE_BODY_TAG, rmargin=caption + 2 * 6 + 12)
         self.clear_button.configure(text=t("ui.clear"))
         self.pause_button.configure(
             text=t("ui.resume") if self.pause_event.is_set() else t("ui.pause")
@@ -445,13 +479,16 @@ class TranscriptWindow:
 
             stamp = time.strftime("%H:%M:%S", time.localtime(line.ts))
             label = f"{speaker(line.label)}: " if self.cfg.show_speaker_labels else ""
-            self._append(f"[{stamp}] {label}{line.text}\n\n")
+            self._append_message(f"[{stamp}] {label}{line.text}", line.text)
             drained += 1
 
         # Доскроллить только если пользователь и так был внизу: иначе
         # вид дёргается ровно в тот момент, когда он что-то выделяет.
         if drained and pinned:
             self.text.see("end")
+        if drained:
+            # Текст под неподвижным курсором мог уехать вместе с прокруткой.
+            self._refresh_hover()
 
     # ------------------------------------------------------------------
     # действия
@@ -467,6 +504,105 @@ class TranscriptWindow:
         self.text.configure(state="normal")
         self.text.insert("end", chunk)
         self.text.configure(state="disabled")
+
+    def _append_message(self, shown: str, spoken: str) -> None:
+        """Фраза со своим тегом — по нему находится то, что под курсором.
+
+        Тегом помечена только сама строка, без пустой строки после неё:
+        курсор в промежутке между фразами не должен подсвечивать ни одну.
+        Копируется сказанное, без метки времени: её человек и так видит,
+        а вставляют фразу обычно в чат или в заметку, где она лишняя.
+        """
+        self._message_seq += 1
+        tag = f"{_MESSAGE_TAG}{self._message_seq}"
+        self._messages[tag] = spoken
+        self.text.configure(state="normal")
+        self.text.insert("end", shown, (tag, _MESSAGE_BODY_TAG))
+        self.text.insert("end", "\n\n")
+        self.text.configure(state="disabled")
+
+    # ------------------------------------------------------------------
+    # копирование одной фразы
+    # ------------------------------------------------------------------
+
+    def _message_at(self, index: str) -> str | None:
+        for tag in self.text.tag_names(index):
+            if tag in self._messages:
+                return tag
+        return None
+
+    def _on_text_motion(self, event) -> None:
+        self._hover(self._message_at(f"@{event.x},{event.y}"))
+
+    def _on_text_leave(self, _event=None) -> None:
+        # Уход с текста на саму кнопку — не уход с фразы. Проверяем после
+        # того, как Tk разошлёт события, иначе кнопка исчезала бы из-под
+        # курсора ровно в момент, когда к ней тянутся.
+        self.root.after(30, self._refresh_hover)
+
+    def _refresh_hover(self) -> None:
+        """Пересчитать фразу под курсором по его текущему положению."""
+        if self._closing:
+            return
+        try:
+            px, py = self.root.winfo_pointerxy()
+            widget = self.root.winfo_containing(px, py)
+        except (tk.TclError, KeyError):
+            widget = None
+        if widget is self.copy_message_button:
+            self._place_copy_button()         # остаёмся на той же фразе
+            return
+        if widget is not self.text:
+            self._hover(None)
+            return
+        x = px - self.text.winfo_rootx()
+        y = py - self.text.winfo_rooty()
+        self._hover(self._message_at(f"@{x},{y}"))
+
+    def _hover(self, tag: str | None) -> None:
+        if tag != self._hovered:
+            self.text.tag_remove(_HOVER_TAG, "1.0", "end")
+            if tag is not None:
+                self.text.tag_add(_HOVER_TAG, f"{tag}.first", f"{tag}.last")
+            self._hovered = tag
+            self.copy_message_button.configure(text=t("ui.copy_message"))
+        self._place_copy_button()
+
+    def _place_copy_button(self) -> None:
+        """Кнопка — у правого края, на уровне первой ВИДИМОЙ строки фразы:
+        у длинной фразы, чьё начало уехало вверх, иначе её было бы не
+        достать."""
+        tag = self._hovered
+        if tag is None or not self.text.tag_ranges(tag):
+            self.copy_message_button.place_forget()
+            return
+        start = self.text.index(f"{tag}.first")
+        top = self.text.index("@0,0")
+        anchor = top if self.text.compare(start, "<", top) else start
+        info = self.text.dlineinfo(anchor)
+        if info is None:                      # фраза целиком за краем
+            self.copy_message_button.place_forget()
+            return
+        _x, y, _width, height, _baseline = info
+        self.copy_message_button.update_idletasks()
+        button_height = self.copy_message_button.winfo_reqheight()
+        self.copy_message_button.place(
+            x=self.text.winfo_width() - 6, y=y + max(0, (height - button_height) // 2),
+            anchor="ne",
+        )
+        self.copy_message_button.lift()
+
+    def _copy_hovered(self) -> None:
+        if self._hovered is None:
+            return
+        content = self._messages.get(self._hovered, "")
+        if not content:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(content)
+        self.root.update()   # без этого буфер обмена не успевает наполниться
+        self.copy_message_button.configure(text=t("ui.message_copied"))
+        self._flash(t("ui.copied"), 1500)
 
     def _select_all(self, _event=None) -> str:
         self.text.tag_add("sel", "1.0", "end-1c")
@@ -486,6 +622,10 @@ class TranscriptWindow:
         self.text.configure(state="normal")
         self.text.delete("1.0", "end")
         self.text.configure(state="disabled")
+        for tag in self._messages:
+            self.text.tag_delete(tag)
+        self._messages.clear()
+        self._hover(None)
         self._flash(t("ui.cleared"), 2500)
 
     def _on_language(self, _event=None) -> None:

@@ -4,8 +4,9 @@ Live transcription of work calls on Windows, entirely on your own machine.
 
 It listens to your microphone and to the system audio at the same time, cuts
 speech into phrases at the pauses, transcribes with `faster-whisper`, and
-shows the text in a window you can copy from. Every line is also written to a
-Markdown file as it arrives.
+shows the text in a window you can copy from — all of it with **Copy all**, or
+one phrase with the **Copy** button that appears when you hover over it. Every
+line is also written to a Markdown file as it arrives.
 
 **Nothing is sent anywhere.** No audio, no text ever leaves the machine. The
 only network access in the app's whole life is the one-time model download on
