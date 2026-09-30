@@ -11,6 +11,7 @@ import time
 import numpy as np
 import pyaudiowpatch as pyaudio
 
+from . import diagnostics
 from .config import Config
 from .i18n import speaker, t
 from .resample import make_resampler
@@ -206,6 +207,10 @@ class AudioCapture(threading.Thread):
 
         self.out_queue: "queue.Queue[tuple[float, np.ndarray]]" = queue.Queue()
         self.started = threading.Event()
+        # Открылся ли поток устройства. Для наблюдателя за захватом это
+        # разница между «устройство не работает» и «работало и отвалилось»:
+        # первое — повод не дёргаться, второе — повод переподключиться.
+        self.opened = False
         self._resampler = None
         self._callback_errors = 0
 
@@ -263,6 +268,7 @@ class AudioCapture(threading.Thread):
                 )
                 stream.start_stream()
         except Exception as exc:
+            diagnostics.log_exception(f"opening {self.device.get('name')}", exc)
             if self.required:
                 self.notifier.fatal(
                     t("audio.open_failed", label=speaker(self.label), error=exc)
@@ -285,6 +291,7 @@ class AudioCapture(threading.Thread):
             self.started.set()
             return
 
+        self.opened = True
         self.started.set()
         try:
             # Ждём именно остановки, а не данных. Блокирующий stream.read()

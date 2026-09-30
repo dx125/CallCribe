@@ -158,20 +158,39 @@ MESSAGES: dict[str, dict[str, str]] = {
               "\n\nПроверьте: Параметры -> Система -> Звук -> Вывод.",
     },
     "audio.stopped": {
-        "en": "[{label}] capture stopped — the device was unplugged or switched.",
-        "ru": "[{label}] захват остановился — устройство отключено или переключено.",
+        "en": "[{label}] capture stopped — the device was unplugged or switched. "
+              "Reconnecting...",
+        "ru": "[{label}] захват остановился — устройство отключено или переключено. "
+              "Переподключаюсь...",
+    },
+    # Захват пересоздан (capture.py). Список — чтобы было видно, что
+    # слушается теперь: после переключения гарнитуры это уже другие
+    # устройства, и человек должен увидеть, что собеседник снова слышен.
+    "audio.reconnected": {
+        "en": "Audio devices changed — listening again. {sources}",
+        "ru": "Аудиоустройства поменялись — снова слушаю. {sources}",
+    },
+    "audio.reconnect_failed": {
+        "en": "Audio devices changed, but nothing could be opened ({error}). "
+              "Retrying in the background.",
+        "ru": "Аудиоустройства поменялись, но открыть не удалось ничего ({error}). "
+              "Повторяю в фоне.",
+    },
+    "audio.watch_failed": {
+        "en": "Stopped following audio device changes ({error}). Capture goes on "
+              "with the current devices; restart CallCribe if you switch headsets.",
+        "ru": "Перестал следить за сменой аудиоустройств ({error}). Захват идёт на "
+              "текущих; если смените гарнитуру — перезапустите CallCribe.",
     },
     "audio.process_errors": {
         "en": "[{label}] audio processing errors: {error}",
         "ru": "[{label}] ошибки обработки звука: {error}",
     },
     "vad.crashed": {
-        "en": "[{label}] speech segmentation stopped and this channel is now "
-              "silent — nothing from it will reach the transcript. Restart "
-              "CallCribe. {error}",
-        "ru": "[{label}] сегментация речи остановилась, и канал замолчал — "
-              "в расшифровку с него больше ничего не попадёт. Перезапустите "
-              "CallCribe. {error}",
+        "en": "[{label}] speech segmentation failed ({error}). Restarting audio "
+              "capture; details are in the log.",
+        "ru": "[{label}] сбой сегментации речи ({error}). Перезапускаю захват "
+              "звука; подробности — в журнале.",
     },
 
     # --- распознавание ---------------------------------------------------
@@ -420,6 +439,90 @@ MESSAGES: dict[str, dict[str, str]] = {
     "ui.model_rejected": {
         "en": "Not a model folder: {reason}",
         "ru": "Это не папка с моделью: {reason}",
+    },
+    "ui.device_caption": {"en": "Device:", "ru": "Устройство:"},
+    "ui.device_auto": {"en": "Auto", "ru": "Авто"},
+    "ui.device_gpu": {"en": "GPU (CUDA)", "ru": "Видеокарта"},
+    "ui.device_cpu": {"en": "CPU", "ru": "Процессор"},
+    "ui.device_requested": {
+        "en": "Reloading the model on: {device}...",
+        "ru": "Перезагружаю модель: {device}...",
+    },
+    "ui.internal_error": {
+        "en": "⚠ Internal error, details saved to the log: {error}",
+        "ru": "⚠ Внутренняя ошибка, подробности в журнале: {error}",
+    },
+
+    # --- окно о падении (supervisor.py) -------------------------------------
+    # Читает человек, у которого только что закрылось приложение. Поэтому:
+    # что случилось — человеческими словами, что сохранилось, что делать.
+    # Код выхода и трассировка — в отчёте, а не в первых строках.
+    "crash.title": {
+        "en": "CallCribe stopped unexpectedly",
+        "ru": "CallCribe неожиданно закрылся",
+    },
+    "crash.gpu_load": {
+        "en": "It closed while loading the speech model on the graphics card. "
+              "Some graphics cards cannot run the model this way, or do not have "
+              "enough free video memory. Starting on the processor (CPU) avoids "
+              "the graphics card entirely — slower, but reliable.",
+        "ru": "Он закрылся, пока загружал модель распознавания на видеокарту. "
+              "Некоторые видеокарты не умеют так запускать модель или им не "
+              "хватает свободной видеопамяти. Запуск на процессоре обходится без "
+              "видеокарты вовсе — медленнее, зато надёжно.",
+    },
+    "crash.cpu_load": {
+        "en": "It closed while loading the speech model on the processor. The "
+              "usual causes are too little free memory or damaged model files; "
+              "a smaller model in the Model list needs less memory.",
+        "ru": "Он закрылся, пока загружал модель распознавания на процессор. "
+              "Обычно причина — мало свободной памяти или повреждённые файлы "
+              "модели; модели поменьше в списке «Модель» памяти нужно меньше.",
+    },
+    "crash.gpu_running": {
+        "en": "It closed during transcription on the graphics card. Starting on "
+              "the processor (CPU) avoids the graphics card entirely.",
+        "ru": "Он закрылся во время распознавания на видеокарте. Запуск на "
+              "процессоре обходится без видеокарты вовсе.",
+    },
+    "crash.running": {
+        "en": "It closed during transcription.",
+        "ru": "Он закрылся во время распознавания.",
+    },
+    "crash.audio": {
+        "en": "It closed while opening the audio devices. Unplugging and "
+              "reconnecting the headset, or choosing another output in Windows "
+              "sound settings, usually helps.",
+        "ru": "Он закрылся, пока открывал аудиоустройства. Обычно помогает "
+              "переподключить гарнитуру или выбрать другой выход в настройках "
+              "звука Windows.",
+    },
+    "crash.shutdown": {
+        "en": "It closed while shutting down.",
+        "ru": "Он закрылся во время завершения работы.",
+    },
+    "crash.startup": {
+        "en": "It closed while starting up.",
+        "ru": "Он закрылся при запуске.",
+    },
+    "crash.transcript": {
+        "en": "Everything transcribed before that is saved:\n{path}",
+        "ru": "Всё, что успело распознаться, сохранено:\n{path}",
+    },
+    "crash.report": {
+        "en": "A detailed report was saved — please send it along if you report "
+              "the problem:\n{path}",
+        "ru": "Подробный отчёт сохранён — приложите его, если будете сообщать "
+              "о проблеме:\n{path}",
+    },
+    "crash.code": {"en": "Exit code: {code}", "ru": "Код выхода: {code}"},
+    "crash.use_cpu": {"en": "Start on the CPU", "ru": "Запустить на процессоре"},
+    "crash.restart": {"en": "Start again", "ru": "Запустить снова"},
+    "crash.open_report": {"en": "Open report", "ru": "Открыть отчёт"},
+    "crash.close": {"en": "Close", "ru": "Закрыть"},
+    "crash.spawn_failed": {
+        "en": "CallCribe could not start: {error}",
+        "ru": "Не удалось запустить CallCribe: {error}",
     },
 
     # --- проверка папки с моделью -------------------------------------------

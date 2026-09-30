@@ -9,10 +9,13 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
+from . import diagnostics
 from .asr import TranscriberWorker
 from .config import (
+    WHISPER_DEVICES,
     WHISPER_MODELS,
     Config,
+    DeviceSetting,
     LanguageSetting,
     ModelSetting,
     language_code,
@@ -49,10 +52,12 @@ class TranscriptWindow:
         stop_event: threading.Event,
         pause_event: threading.Event,
         worker: TranscriberWorker,
-        sources: list[tuple[str, str]],
+        sources: list[tuple[str, str | None]],
         language: LanguageSetting | None = None,
         model: ModelSetting | None = None,
         store: SettingsStore | None = None,
+        device: DeviceSetting | None = None,
+        capture=None,
     ):
         self.cfg = cfg
         self.gui_queue = gui_queue
@@ -66,6 +71,14 @@ class TranscriptWindow:
         # через них окно на него и влияет.
         self.language = language if language is not None else worker.language
         self.model = model if model is not None else worker.model_setting
+        self.device = (
+            device if device is not None
+            else worker.device_setting or DeviceSetting(cfg.whisper_device)
+        )
+        # Наблюдатель захвата (capture.py): устройства за звонок меняются, и
+        # строка источников должна показывать то, что слушается сейчас.
+        self.capture = capture
+        self._sources_version = capture.version if capture is not None else 0
         # None — настройки не сохраняем (так гоняется selftest).
         self.store = store
 
@@ -77,9 +90,14 @@ class TranscriptWindow:
         # после того, как модель РЕАЛЬНО поднялась: иначе в файл настроек
         # уедет то, что не грузится, и следующий запуск начнётся с отказа.
         self._awaiting_model: str | None = None
+        # То же для устройства: сохраняем, только если модель на нём поднялась.
+        self._awaiting_device: str | None = None
 
         self.root = tk.Tk()
         self.root.geometry(cfg.window_geometry)
+        # Исключение в обработчике Tk по умолчанию печатается в stderr, а
+        # под pythonw его нет — ошибка исчезала бесследно.
+        self.root.report_callback_exception = self._on_tk_error
 
         # --- строка 1: статус и кнопки ---------------------------------
         toolbar = tk.Frame(self.root)
@@ -142,9 +160,23 @@ class TranscriptWindow:
             state="readonly",
             width=22,
         )
-        self.model_picker.pack(side="left", padx=(4, 0))
+        self.model_picker.pack(side="left", padx=(4, 12))
         self.model_picker.bind("<<ComboboxSelected>>", self._on_model)
         self._model_values: dict[str, str] = {}
+
+        # Где считать. Меняется на ходу: модель перезагружается на новом
+        # устройстве тем же путём, что и при смене модели.
+        self.device_caption = tk.Label(controls)
+        self.device_caption.pack(side="left")
+        self.device_var = tk.StringVar()
+        self.device_picker = ttk.Combobox(
+            controls,
+            textvariable=self.device_var,
+            state="readonly",
+            width=11,
+        )
+        self.device_picker.pack(side="left", padx=(4, 0))
+        self.device_picker.bind("<<ComboboxSelected>>", self._on_device)
 
         # --- строка 3: откуда берётся звук ------------------------------
         self.sources_label = tk.Label(
@@ -182,12 +214,15 @@ class TranscriptWindow:
         self.speech_caption.configure(text=t("ui.speech_caption"))
         self.interface_caption.configure(text=t("ui.interface_caption"))
         self.model_caption.configure(text=t("ui.model_caption"))
+        self.device_caption.configure(text=t("ui.device_caption"))
 
         # Подпись «Авто» переводится, остальные языки названы на себе —
         # поэтому список пересобирается целиком, а не правится точечно.
         self.language_picker.configure(values=language_names())
         self.language_var.set(language_name(self.language.get()))
         self.ui_language_var.set(ui_language_name(self._ui_language()))
+        self.device_picker.configure(values=list(self._device_labels().values()))
+        self._sync_device_var()
 
         self._rebuild_model_choices()
         self.sources_label.configure(text=self._sources_text())
@@ -200,7 +235,9 @@ class TranscriptWindow:
         подпись там, где хватит перечисления."""
         grouped: dict[str, list[str]] = {}
         for label, name in self.sources:
-            grouped.setdefault(label, []).append(name)
+            # None — для канала нет устройства; переводится здесь, а не при
+            # сборке списка, чтобы следовать за языком интерфейса.
+            grouped.setdefault(label, []).append(name or t("app.no_device"))
         return " · ".join(
             f"{speaker(label)}: {', '.join(names)}" for label, names in grouped.items()
         )
@@ -236,6 +273,24 @@ class TranscriptWindow:
                 self.model_var.set(name)
                 return
         self.model_var.set(model_display(current))
+
+    # ------------------------------------------------------------------
+    # устройство
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _device_labels() -> dict[str, str]:
+        """Код -> подпись, в порядке WHISPER_DEVICES."""
+        names = {
+            "auto": t("ui.device_auto"),
+            "cuda": t("ui.device_gpu"),
+            "cpu": t("ui.device_cpu"),
+        }
+        return {code: names[code] for code in WHISPER_DEVICES}
+
+    def _sync_device_var(self) -> None:
+        current = self._awaiting_device or self.device.get()
+        self.device_var.set(self._device_labels().get(current, current))
 
     # ------------------------------------------------------------------
     # сохранение настроек
@@ -297,36 +352,71 @@ class TranscriptWindow:
     # ------------------------------------------------------------------
 
     def poll(self) -> None:
-        self._drain_notices()
+        """Опрос очередей. Перезапускает себя в finally, а не в конце тела:
+        poll сам назначает свой следующий вызов, и одно исключение здесь
+        останавливало бы окно навсегда — текст больше не появлялся бы, а
+        снаружи это ничем не отличалось бы от «собеседник замолчал»."""
+        try:
+            self._drain_notices()
 
-        if not self._ready_shown and self.worker.ready.is_set():
-            self._ready_shown = True
+            if not self._ready_shown and self.worker.ready.is_set():
+                self._ready_shown = True
 
-        self._check_model_switch()
-        self._drain_lines()
-        self._refresh_status()
-        self.root.after(_POLL_MS, self.poll)
+            self._check_model_switch()
+            self._check_sources()
+            self._drain_lines()
+            self._refresh_status()
+        except Exception as exc:
+            self._report_error(exc)
+        finally:
+            if not self._closing:
+                self.root.after(_POLL_MS, self.poll)
+
+    def _check_sources(self) -> None:
+        """Захват переподключился — показать, что слушается теперь."""
+        if self.capture is None or self.capture.version == self._sources_version:
+            return
+        self._sources_version = self.capture.version
+        self.sources = self.capture.sources()
+        self.sources_label.configure(text=self._sources_text())
 
     def _check_model_switch(self) -> None:
         """Догрузилась ли модель, которую попросили.
 
         Сохраняем выбор только здесь: пока модель не поднялась, записывать
         её в настройки нельзя — иначе неудачный выбор переживёт перезапуск
-        и приложение будет открываться отказом.
+        и приложение будет открываться отказом. С устройством так же: на
+        неудачной смене поток возвращает прежнее, и сохранять нечего.
         """
-        if self._awaiting_model is None:
+        if self._awaiting_model is None and self._awaiting_device is None:
             return
         if self.model.pending() is not None or self.worker.loading.is_set():
             return                          # заявка ещё в пути
 
-        loaded = self.model.get()
-        if loaded == self._awaiting_model:
-            self._save(whisper_model=loaded)
-        # Иначе загрузка не удалась и поток вернул прежнюю модель.
-        # Предупреждение про это уже показал notifier, окну остаётся
-        # вернуть список к тому, что есть на самом деле.
+        if self._awaiting_model is not None and self.model.get() == self._awaiting_model:
+            self._save(whisper_model=self._awaiting_model)
+        if self._awaiting_device is not None and self.device.get() == self._awaiting_device:
+            self._save(whisper_device=self._awaiting_device)
+        # Иначе загрузка не удалась и поток вернул прежнее. Предупреждение
+        # про это уже показал notifier, окну остаётся вернуть списки к тому,
+        # что есть на самом деле.
         self._awaiting_model = None
+        self._awaiting_device = None
         self._sync_model_var()
+        self._sync_device_var()
+
+    def _report_error(self, exc: BaseException) -> None:
+        """Ошибка внутри окна: в журнал целиком, человеку — одной строкой.
+        Не модальным окном: если сбой повторяется на каждом тике опроса,
+        модальные окна пошли бы одно за другим."""
+        diagnostics.log_exception("window", exc)
+        try:
+            self._flash(t("ui.internal_error", error=f"{type(exc).__name__}: {exc}"), 8000)
+        except Exception:
+            pass
+
+    def _on_tk_error(self, exc_type, exc, tb) -> None:
+        self._report_error(exc)
 
     def _drain_notices(self) -> None:
         while True:
@@ -461,6 +551,27 @@ class TranscriptWindow:
             # куда пользователь ходил, а не про то, что удалось поднять.
             self.store.data.remember_model(path)
         self._request_model(path)
+
+    def _on_device(self, _event=None) -> None:
+        chosen = self.device_var.get()
+        code = next(
+            (code for code, name in self._device_labels().items() if name == chosen), None
+        )
+        current = self._awaiting_device or self.device.get()
+        if code is None or code == current:
+            self._sync_device_var()
+            return
+
+        # Выбор действует со следующей загрузки модели — значит, её надо
+        # перезагрузить. Делает это поток распознавания, как и смену модели:
+        # модель CTranslate2 принадлежит ему (см. asr.py).
+        self.device.set(code)
+        self._awaiting_device = code
+        self.model.request_reload()
+        self._flash(
+            t("ui.device_requested", device=self._device_labels()[code]), 6000
+        )
+        self.root.focus_set()
 
     def _request_model(self, value: str) -> None:
         self.model.request(value)

@@ -154,6 +154,16 @@ class ModelSetting:
             # выбор уже выбранного затевал бы перезагрузку модели.
             self._pending = None if name == self._name else name
 
+    def request_reload(self) -> None:
+        """Перезагрузить ту же модель — например, на другом устройстве.
+
+        Отдельный вызов, а не request(то же имя): там «то же самое»
+        сознательно означает «ничего не делать». Уже поданную заявку на
+        другую модель не отменяет — перезагрузка ей и так достанется."""
+        with self._lock:
+            if self._pending is None:
+                self._pending = self._name
+
     def take(self) -> str | None:
         """Поток распознавания забирает заявку. None — менять нечего."""
         with self._lock:
@@ -189,6 +199,29 @@ class LanguageSetting:
     def set(self, code: str | None) -> None:
         with self._lock:
             self._code = code
+
+
+class DeviceSetting:
+    """Где считать: "auto", "cuda" или "cpu" — выбор из окна.
+
+    Та же схема, что у LanguageSetting: пишет окно, читает поток
+    распознавания. Но применяется выбор не сразу, а при следующей загрузке
+    модели — поэтому окно, поменяв устройство, ещё и просит перезагрузку
+    (ModelSetting.request_reload). Модель, поднятая на видеокарте, на
+    процессор сама не переедет.
+    """
+
+    def __init__(self, device: str = "auto"):
+        self._device = device if device in WHISPER_DEVICES else "auto"
+        self._lock = threading.Lock()
+
+    def get(self) -> str:
+        with self._lock:
+            return self._device
+
+    def set(self, device: str) -> None:
+        with self._lock:
+            self._device = device if device in WHISPER_DEVICES else "auto"
 
 
 # Подсказка терминологии — своя на каждый язык. Общее ядро (имена

@@ -1,9 +1,9 @@
 """Настройки, которые пользователь выбрал сам, — и они переживают перезапуск.
 
 Config — это значения по умолчанию, вшитые в код: их правят, открывая
-файл. Здесь другое: три вещи, которые меняют из окна во время работы
-(язык интерфейса, язык распознавания, модель), и они обязаны сохраниться
-до следующего запуска, иначе выбор модели придётся делать каждый раз.
+файл. Здесь другое: то, что меняют из окна во время работы (язык
+интерфейса, язык распознавания, модель, устройство), и оно обязано
+сохраниться до следующего запуска, иначе выбор придётся делать каждый раз.
 
 Файл лежит в %APPDATA%\\CallCribe\\settings.json. Ни одна ошибка чтения не
 должна мешать запуску: испорченный или чужой файл — это предупреждение и
@@ -17,7 +17,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import CFG, LANGUAGE_CODES, WHISPER_MODELS
+from .config import CFG, LANGUAGE_CODES, WHISPER_DEVICES, WHISPER_MODELS
 from .i18n import UI_LANGUAGE_CODES
 
 # Ключ каталога i18n и подстановки к нему. Переводится не здесь: язык
@@ -164,6 +164,7 @@ class Settings:
     ui_language: str = field(default_factory=lambda: CFG.ui_language)
     language: str | None = field(default_factory=lambda: CFG.language)
     whisper_model: str = field(default_factory=lambda: CFG.whisper_model)
+    whisper_device: str = field(default_factory=lambda: CFG.whisper_device)
     custom_models: list[str] = field(default_factory=list)
 
     def to_json(self) -> dict:
@@ -171,6 +172,7 @@ class Settings:
             "ui_language": self.ui_language,
             "language": self.language,
             "whisper_model": self.whisper_model,
+            "whisper_device": self.whisper_device,
             "custom_models": list(self.custom_models),
         }
 
@@ -220,6 +222,15 @@ def _parse(raw: dict) -> tuple[Settings, list[Problem]]:
             data.whisper_model = value
         else:
             complain("whisper_model", value, data.whisper_model)
+
+    # Устройство — из окна или из окна о падении («запустить на
+    # процессоре»). Всё неизвестное — к «авто», а не к отказу.
+    if "whisper_device" in raw:
+        value = raw["whisper_device"]
+        if value in WHISPER_DEVICES:
+            data.whisper_device = value
+        else:
+            complain("whisper_device", value, data.whisper_device)
 
     if "custom_models" in raw:
         value = raw["custom_models"]

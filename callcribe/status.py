@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import logging
 import queue
 import sys
 from dataclasses import dataclass
@@ -14,6 +15,12 @@ from dataclasses import dataclass
 INFO = "info"
 WARN = "warn"
 FATAL = "fatal"
+
+# Всё, что увидел пользователь, должно остаться и в журнале: окно
+# показывает сообщение секунды четыре, а разбираться в случившемся
+# приходится потом — по файлу, см. diagnostics.py.
+_LOG = logging.getLogger("callcribe")
+_LOG_LEVELS = {INFO: logging.INFO, WARN: logging.WARNING, FATAL: logging.ERROR}
 
 
 @dataclass(slots=True)
@@ -34,12 +41,16 @@ class Notifier:
         # не удаться (перенаправленный вывод, закрытый канал). Терять из-за
         # этого сообщение, тем более fatal, нельзя.
         self.queue.put(Notice(level, text))
+        _LOG.log(_LOG_LEVELS.get(level, logging.INFO), text)
         stream = sys.stderr if level in (WARN, FATAL) else sys.stdout
+        # Под pythonw потоки подменены журналом (diagnostics.LogStream), и
+        # печать туда записала бы ту же строку второй раз.
+        if stream is None or getattr(stream, "is_log_stream", False):
+            return
         try:
             print(f"[{level}] {text}", file=stream, flush=True)
         except (UnicodeEncodeError, OSError, ValueError):
             pass
-
 
     def info(self, text: str) -> None:
         self._put(INFO, text)

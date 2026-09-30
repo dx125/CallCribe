@@ -96,6 +96,12 @@ window, and it shuts down cleanly.
 there, and a silent 3 GB wait is otherwise indistinguishable from a hang. Use
 it any time something misbehaves and you want to see why.
 
+Either way, CallCribe runs as two processes: a small supervisor, and the app
+itself underneath it. If the app ever dies — even from a native crash inside
+the GPU stack that Python cannot catch — the supervisor shows what happened
+and saves a report instead of the window silently vanishing. See
+[When it crashes](#when-it-crashes).
+
 Both accept flags that preset the window:
 
 | Flag | Values | Sets |
@@ -103,7 +109,7 @@ Both accept flags that preset the window:
 | `--lang` | `ru` `en` `es` `auto` | Speech language |
 | `--ui-lang` | `en` `ru` | Interface language |
 | `--model` | a size name, a Hugging Face repo id, or a folder path | Whisper model |
-| `--device` | `auto` `cuda` `cpu` | Where to run |
+| `--device` | `auto` `cuda` `cpu` | Where to run (this launch only; the **Device:** dropdown remembers it) |
 | `--compute` | `auto` `int8` `int8_float32` `float16` `float32` … | Compute type |
 
 None of them are required — everything is switchable inside the window. They
@@ -145,8 +151,8 @@ The choice is remembered, so this is a one-time step. See
 
 ## Where your choices are stored
 
-Three things you change in the window — interface language, speech language
-and model — survive a restart. They live in
+Four things you change in the window — interface language, speech language,
+model and device — survive a restart. They live in
 
 ```
 %APPDATA%\CallCribe\settings.json
@@ -154,9 +160,10 @@ and model — survive a restart. They live in
 
 The file is written immediately on each change, not at exit: the app runs for
 a whole call and may not reach a clean shutdown, and losing the model choice
-to that would be the most annoying way to lose it. The model is the exception
-in one direction — it is saved only once it has **actually loaded**, so a
-broken pick cannot survive a restart and turn the next launch into a failure.
+to that would be the most annoying way to lose it. The model and the device are
+the exception in one direction — they are saved only once the model has
+**actually loaded** with them, so a broken pick cannot survive a restart and
+turn the next launch into a failure.
 
 A corrupt file breaks nothing: the app says so in the status line and falls
 back to defaults. To return to what is written in `config.py`, delete it.
@@ -164,6 +171,10 @@ back to defaults. To return to what is written in `config.py`, delete it.
 ## How it works
 
 ```
+                     CaptureSupervisor                    watches Windows' device list
+                     reopens capture when                 and the capture threads;
+                     devices change                       rebuilds both below
+    ┌────────────────────────┴───────┐
 Microphone                  System audio (loopback, one per output device)
     │                                │
     ▼                                ▼
@@ -197,6 +208,10 @@ VadSegmenter                    VadSegmenter          one thread per source:
 | [i18n.py](callcribe/i18n.py) | Message catalog: English and Russian interface |
 | [settings.py](callcribe/settings.py) | What the user picked — read at start, written on every change |
 | [audio.py](callcribe/audio.py) | Device selection and WASAPI capture |
+| [capture.py](callcribe/capture.py) | Keeps capture open on the devices that exist *now*, across unplugs and switches |
+| [endpoints.py](callcribe/endpoints.py) | Live list of Windows audio devices (MMDevice API), to notice that it changed |
+| [diagnostics.py](callcribe/diagnostics.py) | Log file, crash capture, what the app was doing when it died |
+| [supervisor.py](callcribe/supervisor.py) | Parent process: starts the app, turns a crash into a dialog and a report |
 | [resample.py](callcribe/resample.py) | Streaming anti-aliased resampling to 16 kHz |
 | [vad.py](callcribe/vad.py) | Cutting the stream into phrases at pauses |
 | [asr.py](callcribe/asr.py) | Loading whisper, transcription, CPU fallback |
@@ -215,13 +230,13 @@ VadSegmenter                    VadSegmenter          one thread per source:
 
 Everything lives in [config.py](callcribe/config.py).
 
-Three of the values — `ui_language`, `language` and `whisper_model` — are
-**first-launch** defaults only. After that whatever you picked in the window
+Four of the values — `ui_language`, `language`, `whisper_model` and
+`whisper_device` — are **first-launch** defaults only. After that whatever you picked in the window
 wins, from `settings.json` (see [Where your choices are stored](#where-your-choices-are-stored)).
 
 | Setting | Default | Why change it |
 |---|---|---|
-| `whisper_device` | `auto` | Force `cuda` / `cpu`. `auto` takes the GPU when there is one and falls back to the CPU by itself |
+| `whisper_device` | `auto` | First-launch device; the **Device:** dropdown changes it live and remembers it. `auto` takes the GPU when there is one and falls back to the CPU by itself |
 | `whisper_model` | `large-v3` | First-launch model: a size name, a Hugging Face repo id, or a folder path. Changed live in the window, see [Choosing a model](#choosing-a-model) |
 | `cpu_fallback_model` | `large-v3-turbo` | What to use **at startup** when there is no usable GPU. On the CPU everything is dominated by a fixed per-call cost — `large-v3` ~3.1 s, turbo ~2.6 s, with a six times smaller slope. On the 2–5 s phrases a conversation is made of, `large-v3` falls behind real time and turbo keeps up. This substitution never applies to a model you picked in the window — that one loads as asked |
 | `ui_language` | `en` | First-launch interface language: `en` or `ru`. Unrelated to the speech language |
@@ -333,6 +348,20 @@ phrases. Hence the behavior:
 - if the new one fails to load, the old one comes back and the call keeps
   being transcribed. That choice is not written to settings — otherwise the
   failure would survive a restart.
+
+### Device: GPU or CPU
+
+The **Device:** dropdown holds **Auto · GPU (CUDA) · CPU**. Changing it reloads
+the current model on the new device, through the same path as a model switch:
+the old one is released first, and if the new device fails, the model comes
+back on the previous one and the call keeps being transcribed. The choice is
+saved only after the model actually loads.
+
+Pick **CPU** on a small or shared graphics card. A 4 GB card with a browser
+open often lacks the free memory, and older cards (GTX 10xx) cannot run the
+fastest compute type at all. The compute type follows the device on its own
+(`float16` where the card supports it, `int8` variants elsewhere). The status
+line always shows where the model really runs, e.g. `large-v3-turbo · cpu/int8`.
 
 ## What is done about hallucinations
 
@@ -462,6 +491,11 @@ the CPU the app warns in the status line.
   8 kHz; recognition of the other party will noticeably suffer.
 - **Exclusive-mode output devices.** If an application has grabbed the output
   exclusively, loopback will not work — the app shows a clear error at startup.
+- **Device changes cost a second or two.** When Windows' device list changes
+  mid-call — a Bluetooth headset reconnects or switches to hands-free, the call
+  app moves to another output — CallCribe reopens capture on what exists now.
+  It waits for the list to settle first (about 1.5 s), so a word or two spoken
+  exactly during the switch can be lost; everything before and after is kept.
 - **The microphone is optional**: without one the app starts anyway and records
   only the other side, with a warning.
 - **Clipboard and closing the window.** Tk loses ownership of the clipboard on
@@ -479,6 +513,32 @@ Lines are written to the `.md` **as they are transcribed**, not at the end: a
 crash or a kill should not eat a forty-minute call. On a clean window close the
 file is rewritten, sorted by phrase start time — two independent channels
 arrive interleaved.
+
+## When it crashes
+
+CallCribe should not disappear without a word. What happens instead:
+
+- **Errors it survives** — a phrase that fails, a device that will not open, a
+  model that will not load — appear in the status line, or in a dialog when
+  they stop transcription. Transcription carries on wherever it can.
+- **Crashes it cannot survive** (a native fault inside the GPU driver or
+  CTranslate2) end in a dialog from the supervisor process. It says what the
+  app was doing, where the transcript so far is saved, and where the report
+  is. If the crash happened on the graphics card, it offers **Start on the
+  CPU**, which switches the device setting and restarts.
+
+Everything is written down, whichever way the app is launched:
+
+```
+%LOCALAPPDATA%\CallCribe\logs\callcribe.log          running log, rotated at 2 MB
+%LOCALAPPDATA%\CallCribe\logs\crash-YYYYMMDD-HHMMSS.txt   one per crash
+```
+
+A crash report holds the exit code and its meaning, the phase the app was in
+(model, device and compute type included), the stack of every thread at the
+moment of a native fault, your `settings.json`, the machine (CPU, RAM, GPU and
+driver) and the last 300 log lines. **When reporting a problem, send that
+file.** It contains no audio and no transcript text — only paths.
 
 ## Troubleshooting
 
@@ -522,14 +582,23 @@ confirm — you will see `Me` and `Them` rather than one line twice.
 **It transcribes music and browser videos.** Loopback takes everything the
 system plays. Use **Pause**.
 
-**Nothing at all appears, no errors.** Run `run.cmd` instead of the shortcut
-and read the console; then `selftest.py`, which will tell you whether the
-devices were found and where the model landed.
+**Nothing at all appears, no errors.** Read
+`%LOCALAPPDATA%\CallCribe\logs\callcribe.log`, or run `run.cmd` instead of the
+shortcut and read the console; then `selftest.py`, which will tell you whether
+the devices were found and where the model landed.
 
-**It exits right after "loading ..." with code -1073741819.** That is
-`0xC0000005`, an access violation inside the CUDA stack — a native crash, so
-there is no Python traceback and nothing in the window. Two causes, both on
-the GPU side:
+**One side stopped being transcribed mid-call, and a restart fixed it.** The
+audio device under it changed — typically a Bluetooth headset reconnecting or
+switching profile when the call app opened its microphone. CallCribe now
+notices and reopens capture by itself: the status line says *Audio devices
+changed — listening again* and the bottom line lists what is being heard. If
+it happens and that message never shows, send the log: it records every
+device change and every reconnection.
+
+**"CallCribe stopped unexpectedly" while loading the model on the graphics
+card.** The exit code is usually `0xC0000005`, an access violation inside the
+CUDA stack — a native crash, which Python cannot catch. Click **Start on the
+CPU** in that dialog. Two causes, both on the GPU side:
 
 - **The card cannot do `float16`.** CTranslate2 needs compute capability 7.0,
   and Pascal cards (GTX 10xx) are 6.1. CallCribe asks CTranslate2 what the

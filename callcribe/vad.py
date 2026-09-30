@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import webrtcvad
 
+from . import diagnostics
 from .config import Config
 from .i18n import speaker, t
 from .models import Utterance
@@ -157,13 +158,16 @@ class VadSegmenter(threading.Thread):
         try:
             self._loop()
         except Exception as exc:
+            diagnostics.log_exception(f"segmenter {self.name}", exc)
             text = t(
                 "vad.crashed",
                 label=speaker(self.capture.label),
                 error=f"{type(exc).__name__}: {exc}",
             )
+            # Предупреждение, а не отказ: наблюдатель захвата (capture.py)
+            # увидит умерший сегментатор и пересоздаст канал сам.
             if self.notifier is not None:
-                self.notifier.fatal(text)
+                self.notifier.warn(text)
             else:
                 print(text, file=sys.stderr, flush=True)
 

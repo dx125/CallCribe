@@ -19,10 +19,11 @@ import queue
 import threading
 import time
 
-from . import filters
+from . import diagnostics, filters
 from .config import (
     KNOWN_LANGUAGES,
     Config,
+    DeviceSetting,
     LanguageSetting,
     ModelSetting,
     language_name,
@@ -67,6 +68,7 @@ class TranscriberWorker(threading.Thread):
         writer: TranscriptWriter,
         language: LanguageSetting | None = None,
         model_setting: ModelSetting | None = None,
+        device_setting: DeviceSetting | None = None,
     ):
         super().__init__(daemon=True, name="transcriber")
         self.cfg = cfg
@@ -82,6 +84,13 @@ class TranscriberWorker(threading.Thread):
         self.model_setting = (
             model_setting if model_setting is not None else ModelSetting(cfg.whisper_model)
         )
+        # None — устройство берётся из конфигурации (так гоняется selftest);
+        # иначе его выбирают в окне, и новое значение действует со
+        # следующей загрузки модели.
+        self.device_setting = device_setting
+        # Каким было устройство, когда поднималась текущая модель: если смена
+        # не удалась, возвращаться надо и к модели, и к нему.
+        self._loaded_device = self._requested_device()
 
         self.ready = threading.Event()
         self.failed = threading.Event()
@@ -93,11 +102,19 @@ class TranscriberWorker(threading.Thread):
         self.device_label = ""
         self.model = None
         self._auto_fix_reported = False
+        # Поток, который кладёт фразы в очередь (наблюдатель захвата). При
+        # остановке распознавание ждёт его, см. run().
+        self.producer: threading.Thread | None = None
 
     # ------------------------------------------------------------------
 
+    def _requested_device(self) -> str:
+        if self.device_setting is not None:
+            return self.device_setting.get()
+        return (self.cfg.whisper_device or "auto").lower()
+
     def _resolve_device(self) -> tuple[str, str]:
-        requested = (self.cfg.whisper_device or "auto").lower()
+        requested = self._requested_device()
         device = requested
         if device == "auto":
             count = cuda_device_count()
@@ -158,7 +175,20 @@ class TranscriberWorker(threading.Thread):
             self.notifier.info(t("asr.compute_fallback", chosen=chosen))
         return chosen
 
-    def _build_model(self, model_name: str, cpu_fallback: str | None):
+    def _construct(self, model_name: str, device: str, compute: str, phase: str):
+        """Сам конструктор модели — единственное место, где процесс может
+        исчезнуть без исключения (float16 на Pascal, кончилась видеопамять).
+        Поэтому фаза пишется прямо перед ним: по ней наблюдатель узнает, что
+        падение случилось именно здесь, и на каком устройстве."""
+        from faster_whisper import WhisperModel
+
+        self.notifier.info(
+            t("asr.loading", model=model_display(model_name), device=device, compute=compute)
+        )
+        diagnostics.set_phase(phase, model=model_name, device=device, compute=compute)
+        return WhisperModel(model_name, device=device, compute_type=compute)
+
+    def _build_model(self, model_name: str, cpu_fallback: str | None, phase: str = "model_load"):
         """Загрузить модель. Возвращает (модель, имя, подпись устройства).
 
         cpu_fallback — на что заменить модель, если GPU не поднялся. При
@@ -168,8 +198,6 @@ class TranscriberWorker(threading.Thread):
         попросили: пользователь выбрал явно, и молча дать ему другую
         значит соврать в подписи.
         """
-        from faster_whisper import WhisperModel  # импорт после настройки путей к DLL
-
         device, compute = self._resolve_device()
 
         # Машина без видеокарты. large-v3 здесь загрузится без единой
@@ -195,12 +223,9 @@ class TranscriberWorker(threading.Thread):
             model_name = cpu_fallback
 
         try:
-            self.notifier.info(
-                t("asr.loading", model=model_display(model_name),
-                  device=device, compute=compute)
-            )
-            model = WhisperModel(model_name, device=device, compute_type=compute)
+            model = self._construct(model_name, device, compute, phase)
         except Exception as exc:
+            diagnostics.log_exception(f"model {model_name} on {device}/{compute}", exc)
             if device != "cuda":
                 raise
             # Типовые причины: нет cuDNN 9, нет свободной VRAM (LM Studio),
@@ -213,13 +238,10 @@ class TranscriberWorker(threading.Thread):
                 model=model_display(model_name),
                 error=f"{type(exc).__name__}: {exc}",
             ))
-            device, compute = "cpu", self.cfg.whisper_compute or "int8"
+            device = "cpu"
+            compute = self._resolve_compute(device)
             model_name = cpu_fallback or model_name
-            self.notifier.info(
-                t("asr.loading", model=model_display(model_name),
-                  device=device, compute=compute)
-            )
-            model = WhisperModel(model_name, device=device, compute_type=compute)
+            model = self._construct(model_name, device, compute, phase)
 
         return model, model_name, f"{model_display(model_name)} · {device}/{compute}"
 
@@ -231,6 +253,7 @@ class TranscriberWorker(threading.Thread):
         requested = self.model_setting.get()
         self.loading_name = requested
         self.loading.set()
+        self._loaded_device = self._requested_device()
         try:
             model, loaded, label = self._build_model(
                 requested, self.cfg.cpu_fallback_model
@@ -242,6 +265,15 @@ class TranscriberWorker(threading.Thread):
         self.model_setting.confirm(loaded)
         return model
 
+    def _mark_listening(self) -> None:
+        """Фаза «слушаю» — с устройством, на котором реально стоит модель:
+        падение посреди звонка на видеокарте лечится иначе, чем на CPU."""
+        _name, _sep, placement = self.device_label.rpartition(" · ")
+        device, _slash, compute = placement.partition("/")
+        diagnostics.set_phase(
+            "listening", model=self.model_setting.get(), device=device, compute=compute
+        )
+
     def _switch_model(self, requested: str) -> None:
         """Сменить модель по заявке из окна. Вызывается только этим потоком.
 
@@ -252,18 +284,26 @@ class TranscriberWorker(threading.Thread):
         поднимаем обратно прежнюю.
         """
         previous = self.model_setting.get()
+        previous_device = self._loaded_device
+        wanted_device = self._requested_device()
         self.loading_name = requested
         self.loading.set()
         self.model = None
         gc.collect()
 
         try:
-            model, loaded, label = self._build_model(requested, None)
+            model, loaded, label = self._build_model(requested, None, phase="model_switch")
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
+            # Назад — к модели И к устройству, на котором она работала: если
+            # не поднялось как раз новое устройство, прежняя модель на нём
+            # не поднимется тоже, и звонок остался бы без расшифровки.
+            if self.device_setting is not None and wanted_device != previous_device:
+                self.device_setting.set(previous_device)
             try:
-                model, loaded, label = self._build_model(previous, None)
+                model, loaded, label = self._build_model(previous, None, phase="model_switch")
             except Exception as restore_exc:
+                diagnostics.log_exception("restoring the previous model", restore_exc)
                 self.loading.clear()
                 self.failed.set()
                 self.notifier.fatal(t(
@@ -276,6 +316,7 @@ class TranscriberWorker(threading.Thread):
             self.model, self.device_label = model, label
             self.model_setting.confirm(loaded)
             self.loading.clear()
+            self._mark_listening()
             self.notifier.warn(t(
                 "asr.model_switch_failed",
                 model=model_display(requested), error=error,
@@ -285,7 +326,9 @@ class TranscriberWorker(threading.Thread):
 
         self.model, self.device_label = model, label
         self.model_setting.confirm(loaded)
+        self._loaded_device = wanted_device
         self.loading.clear()
+        self._mark_listening()
         self.notifier.info(t("asr.model_switched", device=label))
 
     def _decode(self, audio, language: str | None):
@@ -381,12 +424,14 @@ class TranscriberWorker(threading.Thread):
         try:
             self.model = self._load_model()
         except Exception as exc:
+            diagnostics.log_exception("loading the model", exc)
             self.failed.set()
             self.ready.set()  # чтобы окно перестало ждать
             self.notifier.fatal(t("asr.load_failed", error=f"{type(exc).__name__}: {exc}"))
             return
 
         self.notifier.info(t("asr.ready", device=self.device_label))
+        self._mark_listening()
         self.ready.set()
         lag_reported = False
 
@@ -399,7 +444,11 @@ class TranscriberWorker(threading.Thread):
             try:
                 utt = self.q.get(timeout=0.5)
             except queue.Empty:
-                if self.stop_event.is_set():
+                # Пустая очередь при остановке — ещё не конец: захват в этот
+                # момент дописывает недосказанные фразы. Уйти раньше него —
+                # потерять последнюю реплику звонка.
+                producer = self.producer
+                if self.stop_event.is_set() and not (producer and producer.is_alive()):
                     break
                 lag_reported = False
                 continue
@@ -416,6 +465,7 @@ class TranscriberWorker(threading.Thread):
             try:
                 text = self._transcribe(utt)
             except Exception as exc:
+                diagnostics.log_exception("transcribing a phrase", exc)
                 self.notifier.warn(
                     t("asr.phrase_failed", error=f"{type(exc).__name__}: {exc}")
                 )
@@ -455,6 +505,7 @@ class TranscriberWorker(threading.Thread):
         except Exception as exc:
             # На всякий пожарный: сюда попадать нечем, но остаться без
             # модели молча — худший из исходов.
+            diagnostics.log_exception("switching the model", exc)
             self.loading.clear()
             self.failed.set()
             self.notifier.fatal(

@@ -433,11 +433,13 @@ class _BuildLog:
         self.worker = worker
         self.failing = set(failing)
         self.calls: list[tuple[str, str | None]] = []
+        self.phases: list[str] = []
         self.model_seen: list[object] = []
         self.loading_seen: list[bool] = []
 
-    def __call__(self, name: str, cpu_fallback: str | None):
+    def __call__(self, name: str, cpu_fallback: str | None, phase: str = "model_load"):
         self.calls.append((name, cpu_fallback))
+        self.phases.append(phase)
         self.model_seen.append(self.worker.model)
         self.loading_seen.append(self.worker.loading.is_set())
         if name in self.failing:
@@ -1752,6 +1754,512 @@ def test_model_load() -> None:
     worker.join(timeout=30)
 
 
+def test_device_setting() -> None:
+    """Устройство — выбор из окна: переживает перезапуск и меняется на ходу."""
+    section("Выбор устройства")
+    import tempfile
+    from pathlib import Path
+
+    from callcribe.config import DeviceSetting, ModelSetting
+    from callcribe.settings import SettingsStore
+
+    device = DeviceSetting("cuda")
+    check("выбранное устройство хранится", device.get() == "cuda")
+    device.set("tpu")
+    check("неизвестное устройство — это «авто», а не сбой", device.get() == "auto")
+
+    model = ModelSetting("large-v3")
+    model.request_reload()
+    check("перезагрузка той же модели — это заявка", model.pending() == "large-v3",
+          "request() на то же имя заявки не заводит — нужен отдельный вызов")
+    model.take()
+    model.request("small")
+    model.request_reload()
+    check("перезагрузка не отменяет заявку на другую модель", model.pending() == "small")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "settings.json"
+        store = SettingsStore(path)
+        store.load()
+        store.update(whisper_device="cpu")
+        again = SettingsStore(path)
+        problems = again.load()
+        check("устройство переживает перезапуск",
+              again.data.whisper_device == "cpu" and not problems,
+              f"{again.data.whisper_device} {problems}")
+        path.write_text('{"whisper_device": "tpu"}', encoding="utf-8")
+        bad = SettingsStore(path)
+        problems = bad.load()
+        check("чужое значение устройства — предупреждение и умолчание",
+              bad.data.whisper_device == Config().whisper_device and bool(problems),
+              str(problems))
+
+    # --- смена устройства на ходу -----------------------------------------
+    worker, model, _notifier = _switch_worker("large-v3")
+    device = DeviceSetting("cuda")
+    worker.device_setting = device
+    worker._loaded_device = "cuda"
+    seen: list[str] = []
+
+    def build(name, fallback, phase="model_load"):
+        seen.append(f"{device.get()}:{phase}")
+        return _FakeModel(), name, f"{name} · {device.get()}/int8"
+
+    worker._build_model = build
+    device.set("cpu")
+    model.request_reload()
+    with contextlib.redirect_stderr(io.StringIO()):
+        worker._apply_pending_model()
+    check("смена устройства перезагружает модель уже на новом",
+          seen == ["cpu:model_switch"], str(seen))
+    check("модель при этом та же", model.get() == "large-v3", model.get())
+    check("новое устройство запомнено как рабочее", worker._loaded_device == "cpu")
+    check("и видно в подписи", "cpu" in worker.device_label, worker.device_label)
+
+    # Смена на видеокарту, где модель не поднялась. Возвращаться надо и к
+    # модели, и к устройству: прежняя модель на той же видеокарте тоже бы
+    # не поднялась, и звонок остался бы без расшифровки вовсе.
+    worker, model, notifier = _switch_worker("large-v3")
+    device = DeviceSetting("cpu")
+    worker.device_setting = device
+    worker._loaded_device = "cpu"
+    attempts: list[str] = []
+
+    def flaky(name, fallback, phase="model_load"):
+        attempts.append(device.get())
+        if device.get() == "cuda":
+            raise RuntimeError("CUDA failed with error out of memory")
+        return _FakeModel(), name, f"{name} · cpu/int8"
+
+    worker._build_model = flaky
+    device.set("cuda")
+    model.request_reload()
+    with contextlib.redirect_stderr(io.StringIO()):
+        worker._apply_pending_model()
+    check("не поднялось на видеокарте — назад на прежнее устройство",
+          attempts == ["cuda", "cpu"] and device.get() == "cpu",
+          f"попытки {attempts}, стоит {device.get()}")
+    check("и распознавание продолжается", worker.model is not None and not worker.failed.is_set())
+    check("о неудаче сказано", any(level == "warn" for level, _ in _drain(notifier)))
+
+    # _resolve_device слушает выбор из окна, а не конфигурацию.
+    worker, _model, _notifier = _switch_worker("large-v3")
+    worker.device_setting = DeviceSetting("cpu")
+    with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+        resolved, _compute = worker._resolve_device()
+    check("устройство берётся из выбора в окне", resolved == "cpu", resolved)
+
+
+class _StubCapture(threading.Thread):
+    """Захват без звуковой карты: открывается (или нет) и живёт, пока не
+    остановят — или пока тест не «выдернет устройство»."""
+
+    def __init__(self, device, label, cfg, stop, pause, notifier, required):
+        super().__init__(daemon=True, name=f"fake-capture-{device['name']}")
+        self.device, self.label, self.required = device, label, required
+        self.stop_event = stop
+        self.started = threading.Event()
+        self.opened = False
+        self.pulled = threading.Event()
+        self.out_queue: queue.Queue = queue.Queue()
+
+    def run(self) -> None:
+        if self.device.get("fail_open"):
+            self.started.set()
+            return
+        self.opened = True
+        self.started.set()
+        if self.device.get("dies"):
+            return
+        while not self.stop_event.wait(0.02):
+            if self.pulled.is_set():
+                return
+
+
+class _StubSegmenter(threading.Thread):
+    """На остановке дописывает «недосказанное» — как настоящий."""
+
+    def __init__(self, capture, cfg, transcribe_queue, stop, pause, notifier):
+        super().__init__(daemon=True, name=f"fake-vad-{capture.device['name']}")
+        self.capture, self.stop_event, self.transcribe_queue = capture, stop, transcribe_queue
+
+    def run(self) -> None:
+        self.stop_event.wait()
+        self.transcribe_queue.put(("flushed", self.capture.device["name"]))
+
+
+def _wait_until(condition, timeout: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.02)
+    return condition()
+
+
+def test_capture_supervisor() -> None:
+    """Захват переживает смену устройств посреди звонка.
+
+    Раньше устройства открывались один раз. Переподключилась гарнитура,
+    звонилка перевела звук на другой выход — и один из собеседников
+    исчезал из расшифровки до перезапуска. Перезапуск «чинил», потому что
+    заново открывал звук; теперь это делает наблюдатель.
+    """
+    section("Смена аудиоустройств на ходу")
+    import callcribe.capture as capture_module
+    from callcribe.capture import CaptureSupervisor
+    from callcribe.status import Notifier
+
+    saved = (capture_module.POLL_SECONDS, capture_module.SETTLE_SECONDS,
+             capture_module.RETRY_SECONDS, capture_module.JOIN_SECONDS)
+    capture_module.POLL_SECONDS = 0.03
+    capture_module.SETTLE_SECONDS = 0.2
+    capture_module.RETRY_SECONDS = (0.4, 0.4, 0.4, 0.4)
+    capture_module.JOIN_SECONDS = 1.0
+
+    mic = {"name": "Headset mic", "index": 1}
+    speakers = {"name": "Speakers", "index": 2}
+    headset = {"name": "Headset", "index": 3}
+    state = {"mic": mic, "loops": [speakers], "fail": False, "sig": "A"}
+
+    def enumerate_devices():
+        if state["fail"]:
+            raise RuntimeError("no WASAPI loopback device found")
+        return state["mic"], list(state["loops"])
+
+    def build(stop):
+        notifier = Notifier()
+        tq: queue.Queue = queue.Queue()
+        supervisor = CaptureSupervisor(
+            Config(), tq, stop, threading.Event(), notifier,
+            enumerate_devices=enumerate_devices,
+            make_capture=_StubCapture, make_segmenter=_StubSegmenter,
+            signature=lambda: state["sig"], apartment=contextlib.nullcontext,
+        )
+        return supervisor, notifier, tq
+
+    def captures(supervisor):
+        generation = supervisor._generation
+        return [] if generation is None else [c for c, _s, _r in generation.channels]
+
+    stop = threading.Event()
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            supervisor, notifier, tq = build(stop)
+            supervisor.begin(mic, [speakers])
+            check("первое поколение открыто",
+                  supervisor.sources() == [("me", "Headset mic"), ("them", "Speakers")],
+                  str(supervisor.sources()))
+
+            # --- поток устройства остановился (гарнитуру выдернули) ------
+            version = supervisor.version
+            captures(supervisor)[1].pulled.set()
+            rebuilt = _wait_until(lambda: supervisor.rebuilds == 1)
+            check("остановившийся поток — повод переподключиться", rebuilt,
+                  f"пересозданий: {supervisor.rebuilds}")
+            check("новые потоки живы",
+                  _wait_until(lambda: all(c.is_alive() for c in captures(supervisor))))
+            check("окно узнает об этом по версии", supervisor.version > version)
+            flushed = []
+            while not tq.empty():
+                flushed.append(tq.get())
+            check("старый сегментатор дописал недосказанное",
+                  ("flushed", "Speakers") in flushed, str(flushed))
+
+            # --- список устройств поменялся ------------------------------
+            state["loops"] = [headset]
+            state["sig"] = "B"
+            time.sleep(0.08)
+            check("на первом же изменении не дёргаемся — ждём, пока устоится",
+                  supervisor.rebuilds == 1, f"пересозданий: {supervisor.rebuilds}")
+            check("устоялось — слушаем новые устройства",
+                  _wait_until(lambda: ("them", "Headset") in supervisor.sources()),
+                  str(supervisor.sources()))
+            said = [text for _level, text in _drain(notifier)]
+            check("человеку сказано, что слушается теперь",
+                  any("Headset" in text for text in said), said[-1] if said else "ни слова")
+
+            # Bluetooth при смене профиля роняет и поднимает устройства
+            # несколькими шагами. Пересоздавать захват на каждом — открыть
+            # то, что через полсекунды снова исчезнет.
+            before = supervisor.rebuilds
+            for step in range(8):
+                state["sig"] = "C" if step % 2 else "D"
+                time.sleep(0.06)
+            check("пока список мигает, захват не трогаем",
+                  supervisor.rebuilds == before, f"+{supervisor.rebuilds - before}")
+            check("устоялся — ровно одно пересоздание",
+                  _wait_until(lambda: supervisor.rebuilds == before + 1)
+                  and (time.sleep(0.4) or supervisor.rebuilds == before + 1),
+                  f"+{supervisor.rebuilds - before}")
+
+            # --- открыть не удалось ничего ------------------------------
+            _drain(notifier)
+            state["fail"] = True
+            state["sig"] = "E"
+            check("отказ — поколения нет, а не старое мёртвое",
+                  _wait_until(lambda: supervisor._generation is None),
+                  str(supervisor.sources()))
+            time.sleep(1.0)                 # несколько повторов по расписанию
+            failures = [t for _l, t in _drain(notifier) if "Retrying" in t or "Повторяю" in t]
+            check("об отказе сказано один раз на серию, а не каждый повтор",
+                  len(failures) == 1, f"сообщений: {len(failures)}")
+            state["fail"] = False
+            check("устройство вернулось — захват сам поднимается",
+                  _wait_until(lambda: ("them", "Headset") in supervisor.sources()),
+                  str(supervisor.sources()))
+
+            # --- необязательный вывод не открылся — это не поломка -------
+            state["loops"] = [headset, {"name": "HDMI", "index": 9, "fail_open": True}]
+            state["sig"] = "F"
+            _wait_until(lambda: len(supervisor.sources()) == 3)
+            settled = supervisor.rebuilds
+            time.sleep(0.5)
+            check("мёртвый HDMI-выход не вызывает пересоздания по кругу",
+                  supervisor.rebuilds == settled, f"+{supervisor.rebuilds - settled}")
+
+            # --- канал умирает сразу после каждого пересоздания ----------
+            state["loops"] = [{"name": "Broken", "index": 7, "dies": True}]
+            state["sig"] = "G"
+            _wait_until(lambda: ("them", "Broken") in supervisor.sources())
+            started = supervisor.rebuilds
+            time.sleep(1.5)
+            storm = supervisor.rebuilds - started
+            check("воспроизводимый сбой не превращается в пересоздание раз в тик",
+                  storm <= 8, f"пересозданий за 1.5 с: {storm} (без паузы было бы ~50)")
+
+            # --- остановка -------------------------------------------------
+            state["loops"] = [headset]
+            state["sig"] = "H"
+            _wait_until(lambda: ("them", "Headset") in supervisor.sources())
+            last = captures(supervisor)
+            stop.set()
+            supervisor.join(timeout=5)
+            check("наблюдатель остановился вместе с приложением", not supervisor.is_alive())
+            check("и закрыл все потоки захвата", not any(c.is_alive() for c in last))
+    finally:
+        stop.set()
+        (capture_module.POLL_SECONDS, capture_module.SETTLE_SECONDS,
+         capture_module.RETRY_SECONDS, capture_module.JOIN_SECONDS) = saved
+
+    if sys.platform == "win32":
+        from callcribe.endpoints import endpoint_signature
+
+        # Настоящий список устройств Windows — из потока с COM, как в деле.
+        result: dict = {}
+
+        def probe() -> None:
+            import ctypes
+
+            ctypes.windll.ole32.CoInitializeEx(None, 0x2)
+            try:
+                result["first"] = endpoint_signature()
+                result["second"] = endpoint_signature()
+            finally:
+                ctypes.windll.ole32.CoUninitialize()
+
+        thread = threading.Thread(target=probe)
+        thread.start()
+        thread.join(10)
+        first = result.get("first")
+        check("Windows отвечает списком устройств", first is not None,
+              f"{len(first)} записей" if first else "MMDevice API недоступен")
+        check("и без изменений отвечает одинаково", first == result.get("second"))
+
+
+_CRASH_CHILD = r"""
+import sys
+from callcribe import diagnostics
+diagnostics.install(console=False)
+mode = sys.argv[1]
+print("printed under pythonw")
+if mode == "native":
+    diagnostics.set_phase("model_load", model="large-v3", device="cuda", compute="float16")
+    import ctypes
+    ctypes.c_int.from_address(0).value = 1   # настоящий access violation
+elif mode == "python":
+    raise ValueError("boom at startup")
+elif mode == "thread":
+    import threading
+    worker = threading.Thread(target=lambda: 1 / 0, name="worker-x")
+    worker.start()
+    worker.join()
+    diagnostics.shutdown_clean()
+elif mode == "exited":
+    diagnostics.shutdown_clean()
+    import ctypes
+    ctypes.c_int.from_address(0).value = 1   # настоящий access violation
+elif mode == "twice":
+    from pathlib import Path
+    import json, os
+    marker = Path(os.environ["LOCALAPPDATA"]) / "runs.txt"
+    runs = int(marker.read_text()) + 1 if marker.exists() else 1
+    marker.write_text(str(runs))
+    if runs == 1:
+        diagnostics.set_phase("model_load", model="large-v3", device="cuda", compute="float16")
+        import ctypes
+        ctypes.c_int.from_address(0).value = 1
+    settings = json.loads((Path(os.environ["APPDATA"]) / "CallCribe" / "settings.json").read_text())
+    (Path(os.environ["LOCALAPPDATA"]) / "second.txt").write_text(settings["whisper_device"])
+    diagnostics.shutdown_clean()
+"""
+
+
+def test_crash_handling() -> None:
+    """Падение не бывает молчаливым.
+
+    Приложение запускают ярлыком через pythonw — без консоли и без stderr.
+    Сбой внутри CTranslate2 (как float16 на GTX 1050 Ti) проходит мимо
+    любого except, и раньше от него не оставалось ничего: окно просто
+    закрывалось. Здесь процессы роняются по-настоящему — access violation,
+    а не заглушка, — и проверяется то, что останется после.
+    """
+    section("Падения: журнал, отчёт, окно")
+    import json
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    from callcribe import diagnostics, supervisor
+    from callcribe.i18n import get_language, set_language
+
+    # --- что показать человеку ---------------------------------------------
+    check("штатный выход — не падение", not supervisor.is_crash(0))
+    check("уже показанная ошибка — не падение",
+          not supervisor.is_crash(diagnostics.EXIT_HANDLED))
+    check("Ctrl+C — не падение", not supervisor.is_crash(0xC000013A))
+    check("access violation — падение", supervisor.is_crash(0xC0000005))
+    check("отрицательный код Windows читается так же",
+          supervisor.is_crash(-1073741819) and "access violation" in
+          diagnostics.describe_exit(-1073741819), diagnostics.describe_exit(-1073741819))
+
+    gpu = {"phase": "model_load", "details": {"device": "cuda"}}
+    key, offer = supervisor.crash_kind(gpu)
+    check("упал на видеокарте при загрузке — предлагаем процессор",
+          key == "crash.gpu_load" and offer, f"{key} {offer}")
+    key, offer = supervisor.crash_kind({"phase": "model_load", "details": {"device": "cpu"}})
+    check("упал на процессоре — процессор не предлагаем", key == "crash.cpu_load" and not offer)
+    key, offer = supervisor.crash_kind({"phase": "listening", "details": {"device": "cuda"}})
+    check("упал посреди звонка на видеокарте — тоже процессор", offer, key)
+    check("нет записи о фазе — это старт", supervisor.crash_kind(None)[0] == "crash.startup")
+
+    saved_language = get_language()
+    set_language("en")
+    text, _offer = supervisor.crash_message(
+        0xC0000005, {**gpu, "transcript": r"C:\calls\call_1.md"}, Path(r"C:\logs\crash-1.txt"),
+    )
+    set_language(saved_language)
+    check("в окне — где расшифровка", r"C:\calls\call_1.md" in text)
+    check("в окне — где отчёт", r"C:\logs\crash-1.txt" in text)
+    check("код выхода — последним, а не первым",
+          text.rstrip().endswith("access violation)"), text.splitlines()[-1])
+
+    if sys.platform != "win32":
+        warn("настоящие падения процессов не проверены", "только на Windows")
+        return
+
+    root = str(Path(__file__).resolve().parent)
+
+    def run_child(mode: str, env: dict) -> int:
+        return subprocess.run(
+            [sys.executable, "-c", _CRASH_CHILD, mode], env=env, timeout=60,
+            capture_output=True,
+        ).returncode
+
+    with tempfile.TemporaryDirectory() as tmp:
+        env = dict(os.environ, LOCALAPPDATA=tmp, APPDATA=tmp, PYTHONPATH=root)
+        env.pop(diagnostics.NO_SUPERVISOR_ENV, None)
+        logs = Path(tmp) / "CallCribe" / "logs"
+
+        # --- access violation --------------------------------------------
+        code = run_child("native", env)
+        check("access violation доходит до кода выхода",
+              code & 0xFFFFFFFF == 0xC0000005, diagnostics.describe_exit(code))
+        session = json.loads((Path(tmp) / "CallCribe" / "session.json").read_text("utf-8"))
+        check("фаза пережила падение",
+              session.get("phase") == "model_load"
+              and session["details"].get("device") == "cuda", str(session.get("details")))
+        fault = Path(session["fault"]).read_text("utf-8")
+        check("faulthandler записал, где упало",
+              "access violation" in fault and "<string>" in fault,
+              fault.splitlines()[0] if fault else "пусто")
+        log = (logs / "callcribe.log").read_text("utf-8")
+        check("print под pythonw попадает в журнал", "printed under pythonw" in log)
+
+        os.environ["LOCALAPPDATA"], os.environ["APPDATA"] = tmp, tmp
+        try:
+            report = diagnostics.write_crash_report(code, session)
+        finally:
+            os.environ["LOCALAPPDATA"] = _ORIGINAL_ENV["LOCALAPPDATA"]
+            os.environ["APPDATA"] = _ORIGINAL_ENV["APPDATA"]
+        body = report.read_text("utf-8")
+        check("отчёт собран в один файл", all(
+            part in body for part in ("access violation", "<string>", "model_load",
+                                      "printed under pythonw")
+        ), report.name)
+        check("файл faulthandler после сборки убран", not Path(session["fault"]).exists())
+
+        # --- необработанное исключение Python ------------------------------
+        code = run_child("python", env)
+        log = (logs / "callcribe.log").read_text("utf-8")
+        check("необработанное исключение — свой код выхода",
+              code == diagnostics.EXIT_UNHANDLED, str(code))
+        check("и трассировка в журнале",
+              "ValueError: boom at startup" in log and "Traceback" in log)
+
+        # --- исключение в потоке -------------------------------------------
+        code = run_child("thread", env)
+        log = (logs / "callcribe.log").read_text("utf-8")
+        check("поток умер — процесс жив и выходит штатно", code == 0, str(code))
+        check("а сбой потока записан", "worker-x crashed" in log and "ZeroDivisionError" in log)
+
+        # --- весь цикл наблюдателя ------------------------------------------
+        # Первый запуск падает на видеокарте, человек жмёт «на процессоре»,
+        # второй запуск обязан стартовать уже с ним.
+        shown: list = []
+
+        def fake_dialog(code, session, report):
+            shown.append((code, session, report))
+            return "cpu"
+
+        saved_dialog, saved_command = supervisor.show_crash_dialog, supervisor._child_command
+        supervisor.show_crash_dialog = fake_dialog
+        supervisor._child_command = lambda argv: [sys.executable, "-c", _CRASH_CHILD, *argv]
+        os.environ["LOCALAPPDATA"], os.environ["APPDATA"] = tmp, tmp
+        try:
+            code = supervisor.supervise(["twice"])
+            exited_shown = len(shown)
+            exited_code = supervisor.supervise(["exited"])
+        finally:
+            supervisor.show_crash_dialog, supervisor._child_command = saved_dialog, saved_command
+            os.environ["LOCALAPPDATA"] = _ORIGINAL_ENV["LOCALAPPDATA"]
+            os.environ["APPDATA"] = _ORIGINAL_ENV["APPDATA"]
+            set_language(saved_language)
+
+        check("падение показано окном ровно один раз", exited_shown == 1, str(len(shown)))
+        if shown:
+            crash_code, crash_session, crash_report = shown[0]
+            check("окну известно, что делал процесс",
+                  (crash_session or {}).get("phase") == "model_load")
+            check("и где лежит отчёт", crash_report is not None and crash_report.exists())
+        second = Path(tmp) / "second.txt"
+        check("«на процессоре» — второй запуск стартует с cpu",
+              second.exists() and second.read_text() == "cpu",
+              second.read_text() if second.exists() else "второго запуска не было")
+        check("после штатного второго запуска наблюдатель выходит с 0", code == 0, str(code))
+        check("упал уже после сохранения — окном не пугаем",
+              len(shown) == exited_shown and supervisor.is_crash(exited_code),
+              f"окон: {len(shown) - exited_shown}")
+        check("но отчёт и о нём записан",
+              len(list(logs.glob("crash-*.txt"))) >= 3, str(sorted(logs.glob("crash-*.txt"))))
+
+
+_ORIGINAL_ENV = {
+    "LOCALAPPDATA": os.environ.get("LOCALAPPDATA", ""),
+    "APPDATA": os.environ.get("APPDATA", ""),
+}
+
+
 def main() -> int:
     use_utf8_console()
     parser = argparse.ArgumentParser()
@@ -1767,12 +2275,15 @@ def main() -> int:
     test_languages()
     test_language_routing()
     test_model_switch()
+    test_device_setting()
     test_compute()
     test_vad()
     test_duplicates()
     test_outputs()
     test_devices()
     test_dual_capture()
+    test_capture_supervisor()
+    test_crash_handling()
     test_cuda()
     if args.load_model:
         test_model_load()

@@ -17,6 +17,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import diagnostics
 from .config import Config
 from .i18n import speaker, t
 from .models import Line
@@ -49,6 +50,9 @@ class TranscriptWriter:
         self._fh = self.path.open("w", encoding="utf-8")
         self._fh.write(self._header(first_ts))
         self._fh.flush()
+        # Если процесс упадёт, окно о падении должно сказать, где лежит
+        # уже записанное: это первое, о чём спросит человек.
+        diagnostics.remember(transcript=str(self.path))
 
     # ------------------------------------------------------------------
 
