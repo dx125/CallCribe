@@ -381,22 +381,30 @@ fixed part is the encoder: whisper always works on a 30-second window and pads
 the input with silence, so a one-second remark costs nearly as much as a
 twenty-second one.
 
-For contrast, the same pipeline on the CPU of an 11th-generation Intel
-desktop (Rocket Lake, 8 cores / 16 threads), `large-v3-turbo` at `int8`,
-English speech through the app's own queue:
+The same shape holds on much older hardware. Measured on a GTX 1050 Ti
+(4 GB, Pascal — so `int8_float32`, since the card has no `float16`) against
+the CPU of the same machine (Rocket Lake, 8 cores / 16 threads, `int8`), with
+`large-v3-turbo` and English speech pushed through the app's own queue, median
+of three runs each:
 
-| Fragment length | Transcription time |
-|---|---|
-| 2.4 s | 8.17 s |
-| 5.3 s | 8.53 s |
-| 12.8 s | 8.97 s |
-| 20 s | 9.64 s |
+| Fragment length | GTX 1050 Ti | CPU | RTF on the GPU |
+|---|---|---|---|
+| 2.4 s | 1.38 s | 8.17 s | 0.58 |
+| 5.3 s | 1.47 s | 8.53 s | 0.28 |
+| 12.8 s | 1.77 s | 8.97 s | 0.14 |
+| 20 s | 1.95 s | 9.64 s | 0.10 |
 
-A fixed ~8.0 s per call plus ~0.08 s per second of audio. The shape is the
-same — the encoder dominates — but the fixed part is so large that phrases of
-2-5 s arrive slower than they are spoken, and the queue grows without bound.
-On a machine like this `--device cpu` is a diagnostic option, not a way to
-hold a call.
+On the GPU that is **a fixed ~1.30 s plus ~0.032 s per second of audio**. The
+slope is within rounding of the 4070 Ti's 0.034 — the encoder is the same work
+on both cards — and essentially all of the difference sits in the fixed term,
+0.17 s against 1.30 s. The margin is therefore not 25x but between 1.7x on a
+short remark and 10x on a long one: still live, with less room to spare.
+`large-v3-turbo` peaked at 1.9 GB of the 4 GB, loading in 4.5 s.
+
+The CPU column is the useful warning. A fixed ~8 s per call against phrases of
+2-5 s means transcription never catches up and the queue grows without bound,
+so on this class of machine `--device cpu` is a diagnostic option rather than a
+way to hold a call — which is also why a card this old is still worth using.
 
 Two consequences:
 
@@ -579,13 +587,15 @@ causes, in the order worth checking:
   on a live machine: `ctranslate2` 4.7 and 4.8 could not load **any** model,
   `tiny` included, on the CPU just as on CUDA, while 4.6 opened the same
   folder without complaint. The bounds in `requirements.txt` exclude those
-  releases, so reinstall from it — and reinstall
+  releases, so reinstalling from it is the fix that was actually verified.
+  `selftest.py` checks this under **Нативные библиотеки** — it loads a model in
+  a separate process, so a crash gets reported instead of killing the check.
+  If pinned versions do not help, a stale
   [Microsoft Visual C++ 2015-2022 x64](https://aka.ms/vs/17/release/vc_redist.x64.exe)
-  while you are there: compare `vcruntime140.dll` in `C:\Windows\System32`
-  with the version the redistributable claims to have installed, because a
-  stale DLL there is the usual reason newer wheels misbehave. `selftest.py`
-  checks all of this under **Нативные библиотеки** — it loads a model in a
-  separate process, so a crash gets reported instead of killing the check.
+  runtime is worth ruling out — compare `vcruntime140.dll` in
+  `C:\Windows\System32` with the version the redistributable claims — but note
+  that on the machine all of this was found, the version bounds alone were
+  enough and the runtime was never touched.
 - **The card cannot do `float16`.** CTranslate2 needs compute capability 7.0,
   and Pascal cards (GTX 10xx) are 6.1. CallCribe asks CTranslate2 what the
   device supports and picks the best available, so this should not happen by
