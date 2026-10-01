@@ -381,6 +381,29 @@ fixed part is the encoder: whisper always works on a 30-second window and pads
 the input with silence, so a one-second remark costs nearly as much as a
 twenty-second one.
 
+The same shape holds on much smaller hardware, which is the useful part.
+Measured on a GTX 1050 Ti (4 GB, Pascal, so `int8_float32` rather than
+`float16`), `large-v3-turbo`, English speech through the app's own pipeline:
+
+| Fragment length | GPU | CPU (i7-11700, int8) |
+|---|---|---|
+| 2.4 s | 1.41 s | 8.17 s |
+| 5.3 s | 1.52 s | 8.53 s |
+| 12.8 s | 1.80 s | 8.97 s |
+| 20 s | 2.00 s | 9.64 s |
+
+A fixed ~1.37 s plus ~0.031 s per second of audio — the *slope* matches the
+4070 Ti almost exactly, and only the fixed encoder cost differs. Two things
+follow. On a card like this the margin is roughly 2x rather than 25x, which is
+still comfortably real time. On the CPU the fixed cost is ~8 s against phrases
+of 2-5 s, so it cannot keep up at all: `--device cpu` is a diagnostic option
+on this class of machine, not a way to hold a call. VRAM peaked at 3.4 GB of
+4 GB with `large-v3-turbo`, so `large-v3` does not fit there at all: pick
+turbo in the **Model:** dropdown once and the choice persists, or pass
+`--model large-v3-turbo`. The automatic substitution in `_build_model` still
+only covers the no-GPU case (`cpu_fallback_model`); it does not yet look at
+how much VRAM the card has.
+
 Two consequences:
 
 - **A 25x speed margin.** The latency bottleneck is not computation but
@@ -524,13 +547,51 @@ system plays. Use **Pause**.
 
 **Nothing at all appears, no errors.** Run `run.cmd` instead of the shortcut
 and read the console; then `selftest.py`, which will tell you whether the
-devices were found and where the model landed.
+devices were found, whether a model loads at all, and where it landed.
 
-**It exits right after "loading ..." with code -1073741819.** That is
-`0xC0000005`, an access violation inside the CUDA stack — a native crash, so
-there is no Python traceback and nothing in the window. Two causes, both on
-the GPU side:
+**"Loading the model..." never finishes on the first start.** An interrupted
+download leaves `.incomplete` files in `%USERPROFILE%\.cache\huggingface\hub`,
+and Hugging Face does not resume them: every attempt opens a new one and dies
+in the same place. Delete them and start again — measured on a live machine,
+2.2 GB of such leftovers became a model that then downloaded on the first try.
+The app says this itself when a download fails, and once a model is in the
+cache it no longer contacts Hugging Face at all.
 
+**"cuDNN failed with status CUDNN_STATUS_EXECUTION_FAILED_CUDART".** cuDNN
+9.11 dropped the kernels for Maxwell, Pascal and Volta (GTX 900/1000 series,
+Titan V). The model loads, the window says `cuda`, and then every single
+phrase fails. `requirements-gpu.txt` holds cuDNN below 9.11 for exactly this
+reason, so reinstalling from it is the fix:
+
+```powershell
+.venv\Scripts\python.exe -m pip install -r requirements-gpu.txt
+```
+
+**The status line says the Silero VAD filter was switched off.** Its
+onnxruntime would not run here, so the app dropped the filter instead of
+crashing on the first phrase. Nothing else changes: `webrtcvad` still cuts
+speech into phrases on the way in, and only the second line of defence
+against hallucinations is gone.
+
+**It exits right after "loading ..." with code -1073741819, or the window
+simply disappears.** That is `0xC0000005`, an access violation — a native
+crash, so there is no Python traceback and nothing in the window. Three
+causes, in the order worth checking:
+
+- **A native wheel that crashes on load.** CTranslate2 and onnxruntime are C++
+  libraries. When one is built against a newer Visual C++ runtime than the
+  machine actually has, it does not raise — it takes the process down, past
+  every `except`, without printing a line even under `CT2_VERBOSE=3`. Measured
+  on a live machine: `ctranslate2` 4.7 and 4.8 could not load **any** model,
+  `tiny` included, on the CPU just as on CUDA, while 4.6 opened the same
+  folder without complaint. The bounds in `requirements.txt` exclude those
+  releases, so reinstall from it — and reinstall
+  [Microsoft Visual C++ 2015-2022 x64](https://aka.ms/vs/17/release/vc_redist.x64.exe)
+  while you are there: compare `vcruntime140.dll` in `C:\Windows\System32`
+  with the version the redistributable claims to have installed, because a
+  stale DLL there is the usual reason newer wheels misbehave. `selftest.py`
+  checks all of this under **Нативные библиотеки** — it loads a model in a
+  separate process, so a crash gets reported instead of killing the check.
 - **The card cannot do `float16`.** CTranslate2 needs compute capability 7.0,
   and Pascal cards (GTX 10xx) are 6.1. CallCribe asks CTranslate2 what the
   device supports and picks the best available, so this should not happen by
