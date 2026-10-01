@@ -827,6 +827,14 @@ def test_i18n() -> None:
     check("подстановки в переводах совпадают", not mismatched,
           ", ".join(mismatched[:3]) or f"сверено ключей: {len(MESSAGES)}")
 
+    # Подстановка с именем key невозможна в принципе: так зовётся первый
+    # параметр самой t(), и такой перевод падает TypeError'ом на вызове, а
+    # не отдаёт шаблон. Поймано вживую на «hotkey.taken».
+    collides = [name for name, entry in MESSAGES.items()
+                if any("key" in placeholders(text) for text in entry.values())]
+    check("ни одна подстановка не зовётся key", not collides,
+          ", ".join(collides[:3]) or f"сверено ключей: {len(MESSAGES)}")
+
     # Код и каталог должны сходиться в обе стороны. Опечатка в ключе
     # иначе видна только тому, кто наткнётся на это сообщение вживую.
     package = sorted(pathlib.Path("callcribe").glob("*.py"))
@@ -919,6 +927,7 @@ def test_settings() -> None:
         store.data.language = None          # «Авто»
         store.data.whisper_model = "large-v3-turbo"
         store.data.custom_models = [str(root / "my-model")]
+        store.data.always_on_top = False
         check("сохранение проходит без ошибок", store.save() is None)
         check("временный файл за собой не оставлен",
               not list(root.glob("*.tmp")), [p.name for p in root.glob("*")])
@@ -928,6 +937,12 @@ def test_settings() -> None:
         check("выбор пережил перезапуск",
               (again.data.ui_language, again.data.whisper_model) == ("ru", "large-v3-turbo"),
               f"{again.data.ui_language}, {again.data.whisper_model}")
+        # False тут — именно выбор, а не «не задано»: по умолчанию флажок
+        # стоит, и спутав одно с другим приложение возвращало бы окно
+        # поверх остальных на каждом запуске.
+        check("снятый флажок «поверх окон» переживает перезапуск",
+              again.data.always_on_top is False, repr(again.data.always_on_top))
+
         # None здесь — полноправное значение «Авто», а не «не задано».
         # Спутать их значит терять выбор «Авто» при каждом запуске.
         check("«Авто» сохраняется как выбор, а не как пустота",
@@ -957,11 +972,17 @@ def test_settings() -> None:
         odd.write_text(json.dumps({
             "ui_language": "fr", "language": "de",
             "whisper_model": "", "custom_models": "не список",
+            # Строка «нет» истинна, и принятая молча она включила бы режим
+            # вместо того, чтобы его выключить — ровно наоборот написанному.
+            "always_on_top": "нет",
         }), encoding="utf-8")
         store = SettingsStore(odd)
         keys = [key for key, _ in store.load()]
         check("на каждое негодное поле — своя жалоба",
-              keys == ["settings.bad_value"] * 4, f"жалоб: {len(keys)}")
+              keys == ["settings.bad_value"] * 5, f"жалоб: {len(keys)}")
+        check("не-bool в «поверх окон» отвергнут",
+              store.data.always_on_top is CFG.always_on_top,
+              repr(store.data.always_on_top))
         check("негодные поля заменены умолчаниями",
               (store.data.ui_language, store.data.language, store.data.whisper_model)
               == (CFG.ui_language, CFG.language, CFG.whisper_model),
@@ -1764,6 +1785,71 @@ def test_write_failure() -> None:
     check("поток остановился по stop_event", not worker.is_alive())
 
 
+def test_hotkey() -> None:
+    """Глобальная F8: занимается, отдаёт нажатия, освобождается.
+
+    Клавишу занимаем настоящую и нажатие делаем настоящее — через WinAPI, а
+    не event_generate: проверяется именно то, что нажатие доходит до
+    приложения МИМО фокуса, а подделанное событие Tk об этом не скажет
+    ничего.
+    """
+    section("Глобальная клавиша")
+    if sys.platform != "win32":
+        warn("глобальная клавиша только для Windows", sys.platform)
+        return
+
+    import ctypes
+
+    from callcribe.hotkey import VK_F8, HotkeyListener
+    from callcribe.status import Notifier
+
+    presses: "queue.Queue[float]" = queue.Queue()
+    stop = threading.Event()
+    notifier = Notifier()
+    listener = HotkeyListener(presses, stop, notifier, VK_F8, "F8")
+    listener.start()
+    listener.settled.wait(5)
+
+    if not listener.active.is_set():
+        # Чужое приложение заняло F8 раньше. Это не поломка: в окне F8
+        # работать будет, просто пока окно в фокусе.
+        said = _drain_all(notifier)
+        warn("F8 занята другим приложением — вне фокуса копировать не выйдет",
+             said[-1][:70] if said else "без объяснений")
+        stop.set()
+        listener.join(timeout=5)
+        return
+
+    check("F8 занята на всю систему", True, "RegisterHotKey принял")
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.keybd_event(VK_F8, 0, 0, 0)
+    time.sleep(0.03)
+    user32.keybd_event(VK_F8, 0, 0x2, 0)       # KEYEVENTF_KEYUP
+
+    got = None
+    deadline = time.monotonic() + 3
+    while got is None and time.monotonic() < deadline:
+        try:
+            got = presses.get(timeout=0.1)
+        except queue.Empty:
+            continue
+    check("нажатие доходит до приложения", got is not None,
+          "через очередь, без обращений к Tk из чужого потока")
+
+    stop.set()
+    listener.join(timeout=5)
+    check("слушатель останавливается вместе с приложением", not listener.is_alive())
+
+    # Освободилась ли клавиша: если нет, следующий запуск её не получит.
+    after = HotkeyListener(presses, threading.Event(), Notifier(), VK_F8, "F8")
+    after.start()
+    after.settled.wait(5)
+    check("клавиша освобождена при остановке", after.active.is_set())
+    after.stop_event.set()
+    after.join(timeout=5)
+
+
 def test_native() -> None:
     """Грузится ли модель в этом окружении ВООБЩЕ — и переживёт ли это процесс.
 
@@ -1916,6 +2002,7 @@ def main() -> int:
     test_dual_capture()
     test_cuda()
     test_write_failure()
+    test_hotkey()
     test_native()
     if args.load_model:
         test_model_load()

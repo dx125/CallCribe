@@ -243,6 +243,22 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "phrase transcription failed: {error}",
         "ru": "сбой распознавания фразы: {error}",
     },
+    # --- глобальная клавиша ---------------------------------------------
+    # Подстановка зовётся hotkey, а не key: первый параметр t() уже занят
+    # ключом каталога, и {key} уронил бы перевод TypeError'ом — см. проверку
+    # в selftest.
+    "hotkey.taken": {
+        "en": "{hotkey} is already taken by another application — it will copy "
+              "only while the CallCribe window is focused",
+        "ru": "{hotkey} уже занята другим приложением — копировать будет только "
+              "при активном окне CallCribe",
+    },
+    "hotkey.failed": {
+        "en": "could not claim {hotkey} system-wide (error {error}) — it will "
+              "copy only while the CallCribe window is focused",
+        "ru": "не удалось занять {hotkey} на всю систему (ошибка {error}) — "
+              "копировать будет только при активном окне CallCribe",
+    },
     "asr.write_failed": {
         "en": "could not write the transcript: {error} — the text stays in the "
               "window only, so copy it before closing",
@@ -423,6 +439,15 @@ MESSAGES: dict[str, dict[str, str]] = {
     "ui.nothing_to_copy": {"en": "Nothing to copy", "ru": "Нечего копировать"},
     # Число ставим в конец: иначе в русском пришлось бы согласовывать
     # «строка/строки/строк» с {count}, а механизма склонений здесь нет.
+    "ui.on_top": {"en": "On top", "ru": "Поверх окон"},
+    "ui.on_top_set": {
+        "en": "The window now stays above other windows",
+        "ru": "Окно держится поверх остальных",
+    },
+    "ui.on_top_off": {
+        "en": "The window behaves like any other now",
+        "ru": "Окно ведёт себя как обычное",
+    },
     "ui.copied_new": {
         "en": "Copied to the clipboard, new lines: {count}",
         "ru": "Скопировано в буфер обмена, новых строк: {count}",

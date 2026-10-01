@@ -10,6 +10,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from .asr import TranscriberWorker
+from .hotkey import VK_F8, HotkeyListener
 from .config import (
     WHISPER_MODELS,
     Config,
@@ -88,6 +89,8 @@ class TranscriptWindow:
 
         self.root = tk.Tk()
         self.root.geometry(cfg.window_geometry)
+        self._on_top = tk.BooleanVar(value=self._stored_on_top())
+        self.root.attributes("-topmost", self._on_top.get())
 
         # --- строка 1: статус и кнопки ---------------------------------
         toolbar = tk.Frame(self.root)
@@ -141,6 +144,14 @@ class TranscriptWindow:
         self.ui_language_picker.pack(side="left", padx=(4, 12))
         self.ui_language_picker.bind("<<ComboboxSelected>>", self._on_ui_language)
 
+        # Справа, а не слева: слева подписи со списками, и втиснутый между
+        # ними флажок уехал бы при первом же переводе интерфейса (русские
+        # подписи шире английских).
+        self.on_top_box = tk.Checkbutton(
+            controls, variable=self._on_top, command=self._apply_on_top
+        )
+        self.on_top_box.pack(side="right")
+
         self.model_caption = tk.Label(controls)
         self.model_caption.pack(side="left")
         self.model_var = tk.StringVar()
@@ -186,6 +197,15 @@ class TranscriptWindow:
         # любом выпадающем списке, а копировать всё равно надо.
         self.root.bind_all("<F8>", self.copy_new)
 
+        # Глобальная F8: нажатия приезжают очередью, забирает их poll().
+        # Своего stop_event у слушателя нет — он останавливается вместе со
+        # всем приложением, как потоки захвата и распознавания.
+        self._presses: "queue.Queue[float]" = queue.Queue()
+        self.hotkey = HotkeyListener(
+            self._presses, self.stop_event, self.notifier, VK_F8, "F8"
+        )
+        self.hotkey.start()
+
         self._apply_texts()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(_POLL_MS, self.poll)
@@ -210,6 +230,7 @@ class TranscriptWindow:
         self.speech_caption.configure(text=t("ui.speech_caption"))
         self.interface_caption.configure(text=t("ui.interface_caption"))
         self.model_caption.configure(text=t("ui.model_caption"))
+        self.on_top_box.configure(text=t("ui.on_top"))
 
         # Подпись «Авто» переводится, остальные языки названы на себе —
         # поэтому список пересобирается целиком, а не правится точечно.
@@ -341,8 +362,26 @@ class TranscriptWindow:
 
         self._check_model_switch()
         self._drain_lines()
+        self._drain_presses()
         self._refresh_status()
         self.root.after(_POLL_MS, self.poll)
+
+    def _drain_presses(self) -> None:
+        """Нажатия глобальной F8, пришедшие из потока слушателя.
+
+        Несколько нажатий за один тик — это одно копирование: между ними
+        нового текста всё равно не появилось, а второй проход сказал бы
+        «ничего нового» и затёр сообщение об удачном первом.
+        """
+        pressed = False
+        while True:
+            try:
+                self._presses.get_nowait()
+            except queue.Empty:
+                break
+            pressed = True
+        if pressed:
+            self.copy_new()
 
     def _check_model_switch(self) -> None:
         """Догрузилась ли модель, которую попросили.
@@ -527,6 +566,16 @@ class TranscriptWindow:
         self._awaiting_model = value
         self._rebuild_model_choices()
         self._flash(t("ui.model_requested", model=model_display(value)), 6000)
+        self.root.focus_set()
+
+    def _stored_on_top(self) -> bool:
+        return self.store.data.always_on_top if self.store else self.cfg.always_on_top
+
+    def _apply_on_top(self) -> None:
+        on = bool(self._on_top.get())
+        self.root.attributes("-topmost", on)
+        self._save(always_on_top=on)
+        self._flash(t("ui.on_top_set") if on else t("ui.on_top_off"), 2000)
         self.root.focus_set()
 
     def toggle_pause(self) -> None:

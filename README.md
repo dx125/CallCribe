@@ -118,15 +118,28 @@ Transcripts are saved to `%USERPROFILE%\call-transcripts\call_YYYYMMDD_HHMMSS.md
 
 | Shortcut | Does |
 |---|---|
-| `F8` | Copies **only the lines added since your last copy** |
+| `F8` | Copies **only the lines added since your last copy** — works from any application |
 | `Ctrl+C` | Copies the selection, as in any text field |
 | `Ctrl+A` | Selects the whole transcript |
 
-`F8` is for pasting a call into a chat as it happens: press it and
-you get the new lines, not the whole transcript again, so you never have to
-hunt for where the last paste ended. The first press gives you everything so
-far, and **Copy all** moves the boundary too — after it, nothing is new.
-Clearing the window resets the boundary to the start.
+`F8` is for pasting a call into a chat as it happens: press it and you get the
+new lines, not the whole transcript again, so you never have to hunt for where
+the last paste ended. The first press gives you everything so far, and
+**Copy all** moves the boundary too — after it, nothing is new. Clearing the
+window resets the boundary to the start.
+
+**`F8` works while you are in another application.** It is claimed from the
+system with `RegisterHotKey`, so the click into Teams or Slack that takes focus
+away from CallCribe does not take the shortcut with it: click, press `F8`,
+paste, keep talking. Only that one key is requested — nothing watches your
+typing — and no administrator rights are involved. If another application
+already owns `F8`, the status line says so at startup and the key keeps working
+inside the CallCribe window.
+
+The **On top** checkbox keeps the window above other windows, which is on by
+default: the transcript is wanted exactly during the minutes you spend in
+another app, and buried under it, it is no use. Untick it and the window
+behaves like any other. The choice is remembered between runs.
 
 ### First start, step by step
 

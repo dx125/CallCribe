@@ -165,6 +165,7 @@ class Settings:
     language: str | None = field(default_factory=lambda: CFG.language)
     whisper_model: str = field(default_factory=lambda: CFG.whisper_model)
     custom_models: list[str] = field(default_factory=list)
+    always_on_top: bool = field(default_factory=lambda: CFG.always_on_top)
 
     def to_json(self) -> dict:
         return {
@@ -172,6 +173,7 @@ class Settings:
             "language": self.language,
             "whisper_model": self.whisper_model,
             "custom_models": list(self.custom_models),
+            "always_on_top": self.always_on_top,
         }
 
     def remember_model(self, value: str) -> None:
@@ -227,6 +229,16 @@ def _parse(raw: dict) -> tuple[Settings, list[Problem]]:
             data.custom_models = value[:MAX_CUSTOM_MODELS]
         else:
             complain("custom_models", value, data.custom_models)
+
+    # Ровно bool, а не всё истинное: 1 и "нет" в этом поле означают, что
+    # файл правили руками и ошиблись, — а молча принятая строка «нет»
+    # включила бы режим вместо того, чтобы его выключить.
+    if "always_on_top" in raw:
+        value = raw["always_on_top"]
+        if isinstance(value, bool):
+            data.always_on_top = value
+        else:
+            complain("always_on_top", value, data.always_on_top)
 
     # Папку могли переименовать или отключить диск. Тогда выбор нужно
     # снять сейчас, а не ловить отказ загрузки через полминуты.
