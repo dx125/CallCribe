@@ -421,6 +421,16 @@ MESSAGES: dict[str, dict[str, str]] = {
     },
     "ui.copied": {"en": "Copied to the clipboard", "ru": "Скопировано в буфер обмена"},
     "ui.nothing_to_copy": {"en": "Nothing to copy", "ru": "Нечего копировать"},
+    # Число ставим в конец: иначе в русском пришлось бы согласовывать
+    # «строка/строки/строк» с {count}, а механизма склонений здесь нет.
+    "ui.copied_new": {
+        "en": "Copied to the clipboard, new lines: {count}",
+        "ru": "Скопировано в буфер обмена, новых строк: {count}",
+    },
+    "ui.nothing_new": {
+        "en": "Nothing new since the last copy",
+        "ru": "С прошлого раза ничего нового",
+    },
     "ui.cleared": {
         "en": "Window cleared (the file on disk is untouched)",
         "ru": "Окно очищено (файл на диске не тронут)",

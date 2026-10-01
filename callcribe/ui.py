@@ -35,6 +35,14 @@ _POLL_MS = 100
 _MAX_DRAIN = 50          # строк за один тик, чтобы не подвесить GUI
 _TRANSIENT_MS = 4000     # сколько держать временное сообщение в статусе
 
+_COPIED_MARK = "copied"
+"""Граница «это уже уехало в буфер обмена» в тексте окна.
+
+Именно метка Tk, а не номер строки: метку Tk сам сдвигает при вставке и
+сбрасывает при очистке окна, а индекс пришлось бы пересчитывать руками —
+и он бы разошёлся с текстом при первом же «Очистить».
+"""
+
 
 class TranscriptWindow:
     """Живой вывод расшифровки. Текст выделяется и копируется как обычный,
@@ -157,6 +165,26 @@ class TranscriptWindow:
         self.text.configure(state="disabled")   # выделять и копировать можно, править — нет
         self.text.bind("<Control-a>", self._select_all)
         self.text.bind("<Control-A>", self._select_all)
+
+        # Граница «уже скопировано». Гравитация left — чтобы текст, который
+        # вставят ровно В неё, считался новым, а не уезжал вместе с меткой
+        # (с right он бы уползал в конец, и нового не оказывалось никогда).
+        self.text.mark_set(_COPIED_MARK, "1.0")
+        self.text.mark_gravity(_COPIED_MARK, "left")
+
+        # Ctrl+Shift+C — забрать только то, что появилось с прошлого раза:
+        # на звонке расшифровку скидывают в переписку по ходу дела, и
+        # «Скопировать всё» заставляет каждый раз вручную искать, где
+        # кончается уже отправленное. Ctrl+C не трогаем — это выделение,
+        # его копирует сам Tk.
+        #
+        # bind_all, а не bind на тексте: фокус в этот момент может стоять на
+        # любом выпадающем списке, а копировать всё равно надо.
+        # Одной привязки достаточно: с зажатым Shift клавиша приходит как
+        # keysym «C», и Tk сводит к этому же шаблону обе записи — проверено
+        # event_generate'ом на оба варианта. Второй bind_all не сработал бы
+        # ни разу.
+        self.root.bind_all("<Control-Shift-C>", self.copy_new)
 
         self._apply_texts()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -391,20 +419,43 @@ class TranscriptWindow:
         self.text.tag_add("sel", "1.0", "end-1c")
         return "break"
 
+    def _to_clipboard(self, content: str) -> None:
+        self.root.clipboard_clear()
+        self.root.clipboard_append(content)
+        self.root.update()   # без этого буфер обмена не успевает наполниться
+        # В буфере теперь всё до этой точки, значит нового за ней не осталось.
+        self.text.mark_set(_COPIED_MARK, "end-1c")
+
     def copy_all(self) -> None:
         content = self.text.get("1.0", "end").strip()
         if not content:
             self._flash(t("ui.nothing_to_copy"), 1500)
             return
-        self.root.clipboard_clear()
-        self.root.clipboard_append(content)
-        self.root.update()   # без этого буфер обмена не успевает наполниться
+        self._to_clipboard(content)
         self._flash(t("ui.copied"), 1500)
+
+    def copy_new(self, _event=None) -> str:
+        """Ctrl+Shift+C: только строки, появившиеся после прошлого копирования.
+
+        Границу двигает любое копирование, в том числе «Скопировать всё»:
+        после него в буфере лежит весь текст, и отдавать те же строки
+        второй раз как «новые» значит соврать.
+        """
+        content = self.text.get(_COPIED_MARK, "end").strip()
+        if not content:
+            self._flash(t("ui.nothing_new"), 1500)
+            return "break"
+        self._to_clipboard(content)
+        count = sum(1 for line in content.splitlines() if line.strip())
+        self._flash(t("ui.copied_new", count=count), 2000)
+        return "break"
 
     def clear_text(self) -> None:
         self.text.configure(state="normal")
         self.text.delete("1.0", "end")
         self.text.configure(state="disabled")
+        # Текста нет — границе тоже некуда показывать, кроме начала.
+        self.text.mark_set(_COPIED_MARK, "1.0")
         self._flash(t("ui.cleared"), 2500)
 
     def _on_language(self, _event=None) -> None:

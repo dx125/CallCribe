@@ -114,6 +114,20 @@ than after half a minute of loading.
 
 Transcripts are saved to `%USERPROFILE%\call-transcripts\call_YYYYMMDD_HHMMSS.md`.
 
+### Keyboard
+
+| Shortcut | Does |
+|---|---|
+| `Ctrl+Shift+C` | Copies **only the lines added since your last copy** |
+| `Ctrl+C` | Copies the selection, as in any text field |
+| `Ctrl+A` | Selects the whole transcript |
+
+`Ctrl+Shift+C` is for pasting a call into a chat as it happens: press it and
+you get the new lines, not the whole transcript again, so you never have to
+hunt for where the last paste ended. The first press gives you everything so
+far, and **Copy all** moves the boundary too — after it, nothing is new.
+Clearing the window resets the boundary to the start.
+
 ### First start, step by step
 
 1. The window opens right away and says `Loading the model...`.
