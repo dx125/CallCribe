@@ -7,6 +7,22 @@
 
 # --- core ---
 faster-whisper>=1.1.0,<2
+
+# CTranslate2 приезжает вместе с faster-whisper, но верхнюю границу ему
+# надо поставить здесь: faster-whisper разрешает любую 4.x, а 4.7 и 4.8
+# на живой машине не грузят НИ ОДНУ модель. 4.8 роняет процесс
+# segfault'ом внутри конструктора — мимо except, без единой строки лога
+# даже при CT2_VERBOSE=3; 4.7 падает FileNotFoundError на той самой
+# папке, которую 4.6 открывает без вопросов. Проверено на tiny и на
+# large-v3-turbo, на CPU и на CUDA: дело не в модели, не в устройстве и
+# не в кэше. Проверить своё окружение: selftest.py, раздел «Загрузка
+# модели».
+ctranslate2>=4.5,<4.7
+
+# ctranslate2 4.5-4.6 импортирует pkg_resources, а setuptools 81 его
+# выкинул — без этой границы импорт ctranslate2 падает ModuleNotFoundError.
+setuptools<81
+
 numpy>=1.26,<3
 PyAudioWPatch>=0.2.12.7,<0.3
 webrtcvad-wheels>=2.0.14,<3

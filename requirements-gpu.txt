@@ -16,4 +16,9 @@
 -r requirements.txt
 
 nvidia-cublas-cu12>=12.1,<13
-nvidia-cudnn-cu12>=9.1,<10
+# cuDNN 9.11 выкинул ядра для Maxwell, Pascal и Volta (sm_50 - sm_70).
+# На GTX 10xx с 9.26 модель грузится и подписывается «cuda» — а первая же
+# фраза падает с CUDNN_STATUS_EXECUTION_FAILED_CUDART, потому что считать
+# нечем. Проверено на GTX 1050 Ti (sm_61). 9.10 умеет и Pascal, и всё
+# новое, так что граница не мешает никому.
+nvidia-cudnn-cu12>=9.1,<9.11
