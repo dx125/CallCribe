@@ -381,28 +381,22 @@ fixed part is the encoder: whisper always works on a 30-second window and pads
 the input with silence, so a one-second remark costs nearly as much as a
 twenty-second one.
 
-The same shape holds on much smaller hardware, which is the useful part.
-Measured on a GTX 1050 Ti (4 GB, Pascal, so `int8_float32` rather than
-`float16`), `large-v3-turbo`, English speech through the app's own pipeline:
+For contrast, the same pipeline on the CPU of an 11th-generation Intel
+desktop (Rocket Lake, 8 cores / 16 threads), `large-v3-turbo` at `int8`,
+English speech through the app's own queue:
 
-| Fragment length | GPU | CPU (i7-11700, int8) |
-|---|---|---|
-| 2.4 s | 1.41 s | 8.17 s |
-| 5.3 s | 1.52 s | 8.53 s |
-| 12.8 s | 1.80 s | 8.97 s |
-| 20 s | 2.00 s | 9.64 s |
+| Fragment length | Transcription time |
+|---|---|
+| 2.4 s | 8.17 s |
+| 5.3 s | 8.53 s |
+| 12.8 s | 8.97 s |
+| 20 s | 9.64 s |
 
-A fixed ~1.37 s plus ~0.031 s per second of audio — the *slope* matches the
-4070 Ti almost exactly, and only the fixed encoder cost differs. Two things
-follow. On a card like this the margin is roughly 2x rather than 25x, which is
-still comfortably real time. On the CPU the fixed cost is ~8 s against phrases
-of 2-5 s, so it cannot keep up at all: `--device cpu` is a diagnostic option
-on this class of machine, not a way to hold a call. VRAM peaked at 3.4 GB of
-4 GB with `large-v3-turbo`, so `large-v3` does not fit there at all: pick
-turbo in the **Model:** dropdown once and the choice persists, or pass
-`--model large-v3-turbo`. The automatic substitution in `_build_model` still
-only covers the no-GPU case (`cpu_fallback_model`); it does not yet look at
-how much VRAM the card has.
+A fixed ~8.0 s per call plus ~0.08 s per second of audio. The shape is the
+same — the encoder dominates — but the fixed part is so large that phrases of
+2-5 s arrive slower than they are spoken, and the queue grows without bound.
+On a machine like this `--device cpu` is a diagnostic option, not a way to
+hold a call.
 
 Two consequences:
 
