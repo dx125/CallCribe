@@ -243,6 +243,34 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "phrase transcription failed: {error}",
         "ru": "сбой распознавания фразы: {error}",
     },
+    "asr.write_failed": {
+        "en": "could not write the transcript: {error} — the text stays in the "
+              "window only, so copy it before closing",
+        "ru": "не удалось записать расшифровку: {error} — текст останется "
+              "только в окне, скопируйте его до закрытия",
+    },
+    "asr.vad_filter_off": {
+        "en": "the Silero VAD filter does not run in this environment ({reason}) — "
+              "switching it off; webrtcvad still guards the input, only the second "
+              "line of defence against hallucinations is gone",
+        "ru": "фильтр Silero VAD в этом окружении не работает ({reason}) — "
+              "выключаю; на входе по-прежнему стоит webrtcvad, пропадает только "
+              "второй рубеж против галлюцинаций",
+    },
+    "asr.downloading": {
+        "en": "{model} is not in the cache — downloading it. This happens once, "
+              "and it is the only time the app touches the network",
+        "ru": "{model} нет в кэше — качаю. Это один раз, и это единственный "
+              "случай, когда приложение выходит в сеть",
+    },
+    "asr.download_partials": {
+        "en": "the download failed and the cache still holds {count} unfinished "
+              "file(s). Hugging Face does not resume them — delete them and start "
+              "again: {path}",
+        "ru": "загрузка не удалась, а в кэше осталось незавершённых файлов: "
+              "{count}. Hugging Face их не продолжает — удалите их и запустите "
+              "снова: {path}",
+    },
     "asr.slower_than_realtime": {
         "en": "a {duration:.1f}s phrase took {elapsed:.1f}s — slower than real time",
         "ru": "фраза {duration:.1f}с распознана за {elapsed:.1f}с — "
@@ -375,6 +403,10 @@ MESSAGES: dict[str, dict[str, str]] = {
     "ui.model_caption": {"en": "Model:", "ru": "Модель:"},
     "ui.browse_model": {"en": "Browse...", "ru": "Выбрать папку..."},
     "ui.loading_model": {"en": "Loading the model...", "ru": "Загружаю модель..."},
+    "ui.downloading": {
+        "en": "Downloading {model} — first start only...",
+        "ru": "Качаю {model} — только при первом запуске...",
+    },
     "ui.loading_named": {"en": "Loading {model}...", "ru": "Загружаю {model}..."},
     "ui.listening": {"en": "Listening... [{device}]", "ru": "Слушаю... [{device}]"},
     "ui.queued": {"en": " (queued: {count})", "ru": " (в очереди: {count})"},

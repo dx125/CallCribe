@@ -680,8 +680,16 @@ def test_model_switch() -> None:
     worker, _setting, notifier = _switch_worker("large-v3")
     saved_count = asr_module.cuda_device_count
     saved_missing = asr_module.missing_cuda_libraries
+    # Формат вычислений проверяет test_compute(), а здесь — выбор
+    # УСТРОЙСТВА. Но _resolve_device() попутно спрашивает формат у
+    # настоящей карты, и на Pascal («float16 нет») проверка выбора
+    # устройства падала из-за железа под ней. Поэтому отвечаем за карту
+    # сами: результат проверки от машины зависеть не должен.
+    saved_compute = asr_module.supported_compute_types
     try:
         asr_module.cuda_device_count = lambda: 1
+        asr_module.supported_compute_types = lambda device: frozenset(
+            {"float16", "int8_float16", "int8", "int8_float32", "float32"})
 
         asr_module.missing_cuda_libraries = lambda: ["cublas64_12.dll"]
         worker.cfg = dataclasses.replace(worker.cfg, whisper_device="auto")
@@ -708,6 +716,7 @@ def test_model_switch() -> None:
     finally:
         asr_module.cuda_device_count = saved_count
         asr_module.missing_cuda_libraries = saved_missing
+        asr_module.supported_compute_types = saved_compute
 
     # --- модель не поднялась -------------------------------------------
     worker, setting, notifier = _switch_worker("large-v3", failing={"мусор"})
@@ -737,6 +746,17 @@ def test_model_switch() -> None:
           problems[-1][1][:70] if problems else "промолчали")
     check("поток помечен отказавшим", worker.failed.is_set(),
           "фразы дальше не берутся")
+
+    # Отказ обязан сниматься удачной загрузкой, а не только перезапуском:
+    # пока он взведён, run() молча выбрасывает КАЖДУЮ фразу — окно при этом
+    # бодро сообщает «модель переключена», и приложение выглядит глухим.
+    worker._build_model.failing.clear()
+    setting.request("small")
+    with contextlib.redirect_stderr(io.StringIO()):
+        worker._apply_pending_model()
+    check("удачная загрузка снимает отказ", not worker.failed.is_set(),
+          f"стоит {setting.get()}")
+    check("и модель снова в руках", worker.model is not None, worker.device_label)
     check("«гружусь» снято и в этом случае", not worker.loading.is_set())
 
 
@@ -1665,6 +1685,127 @@ def test_cuda() -> None:
         check("библиотеки счёта CUDA загружаются", True, "cuBLAS и cuDNN на месте")
 
 
+class _TextSegment:
+    """Сегмент с текстом: _FakeModel отдаёт пустой результат, а здесь нужна
+    строка, которая дойдёт до записи на диск."""
+
+    def __init__(self, text: str):
+        self.text = text
+        self.no_speech_prob = 0.0
+        self.avg_logprob = -0.1
+
+
+class _TalkingModel:
+    def transcribe(self, audio, **kwargs):
+        return [_TextSegment("миграция не накатилась")], None
+
+
+def test_write_failure() -> None:
+    """Сбой записи на диск не должен уносить с собой поток распознавания.
+
+    Папка только для чтения, кончилось место, файл держит OneDrive — раньше
+    исключение из writer.append() убивало поток: под pythonw трассировку
+    печатать некуда, окно продолжало писать «Слушаю», очередь росла, и
+    больше не появлялось ни строки.
+    """
+    section("Сбой записи расшифровки")
+    from callcribe.asr import TranscriberWorker
+    from callcribe.config import LanguageSetting
+    from callcribe.status import Notifier
+    from callcribe.transcript import TranscriptWriter
+
+    class _ReadOnlyWriter(TranscriptWriter):
+        def __init__(self, cfg):
+            super().__init__(cfg)
+            self.tries = 0
+
+        def append(self, line):
+            self.tries += 1
+            raise OSError("[Errno 13] Permission denied")
+
+    cfg = Config(use_whisper_vad_filter=False)   # проба VAD здесь не при чём
+    writer = _ReadOnlyWriter(cfg)
+    notifier = Notifier()
+    gui_q: "queue.Queue" = queue.Queue()
+    worker = TranscriberWorker(
+        cfg, queue.Queue(), gui_q, threading.Event(), notifier,
+        writer, LanguageSetting("ru"), None,
+    )
+    # Настоящую загрузку подменяем: проверяется цикл, а не модель.
+    worker._load_model = lambda: _TalkingModel()
+
+    with contextlib.redirect_stderr(io.StringIO()):
+        worker.start()
+        worker.ready.wait(10)
+        for _ in range(3):
+            worker.q.put(Utterance("me", time.time(), np.zeros(16_000, np.float32)))
+
+        lines = []
+        deadline = time.monotonic() + 15
+        while len(lines) < 3 and time.monotonic() < deadline:
+            try:
+                lines.append(gui_q.get(timeout=0.2))
+            except queue.Empty:
+                continue
+        alive = worker.is_alive()
+        worker.stop_event.set()
+        worker.join(timeout=10)
+
+    warns = [text for level, text in _drain(notifier) if level == "warn"]
+
+    check("поток распознавания не упал вместе с записью", alive,
+          "жив после трёх сбоёв подряд")
+    check("текст всё равно доходит до окна", len(lines) == 3,
+          f"строк в окне: {len(lines)}")
+    check("писать пытались каждый раз", writer.tries == 3,
+          f"попыток: {writer.tries}")
+    check("о сбое записи сказано, и один раз", len(warns) == 1,
+          warns[0][:70] if warns else "промолчали")
+    check("поток остановился по stop_event", not worker.is_alive())
+
+
+def test_native() -> None:
+    """Грузится ли модель в этом окружении ВООБЩЕ — и переживёт ли это процесс.
+
+    Раздел появился после живой поломки, которую selftest не поймал:
+    ctranslate2, подтянутый без верхней границы, падал на загрузке любой
+    модели, а suite показывал 180 проверок из 180. Поймать это внутри
+    своего процесса нельзя — падение уносит и его, — поэтому проба идёт
+    отдельным процессом, а здесь мы смотрим только на её вердикт.
+    """
+    section("Нативные библиотеки")
+    from callcribe.preflight import model_loads, unfinished_downloads, vad_filter_works
+
+    partials = unfinished_downloads()
+    if partials:
+        warn("в кэше есть незавершённые загрузки",
+             f"{len(partials)} шт.; Hugging Face их не продолжает, удалите: "
+             f"{partials[0].parent}")
+
+    # tiny берём намеренно: она маленькая, качается за секунды и грузится
+    # тем же кодом, что и large. Если ломается загрузка, ломается на ней тоже.
+    probe = "tiny"
+    ok, detail = model_loads(probe, device="cpu", compute="int8", timeout=600)
+    absent = "local_files_only" in detail or "not appear to have" in detail
+    if not ok and absent:
+        warn(f"модели {probe} нет в кэше — загрузку проверить нечем",
+             "скачайте её или запустите с --load-model")
+    else:
+        check("модель грузится в этом окружении", ok,
+              detail or f"проверено на {probe}, cpu/int8")
+        if not ok:
+            print("     -> почти всегда это версии нативных колёс:")
+            print("        pip install -r requirements.txt  (границы там не случайны)")
+            print("     -> и проверьте Microsoft Visual C++ 2015-2022 x64 Redistributable")
+
+    works, reason = vad_filter_works()
+    if works:
+        check("фильтр Silero VAD работает", True, "onnxruntime на месте")
+    else:
+        warn("фильтр Silero VAD не работает — приложение снимет его на старте",
+             f"{reason}; на входе останется webrtcvad")
+
+
 def test_model_load() -> None:
     section("Загрузка whisper и распознавание")
     from callcribe.asr import TranscriberWorker
@@ -1774,6 +1915,8 @@ def main() -> int:
     test_devices()
     test_dual_capture()
     test_cuda()
+    test_write_failure()
+    test_native()
     if args.load_model:
         test_model_load()
 

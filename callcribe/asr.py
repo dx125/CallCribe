@@ -35,6 +35,7 @@ from .cuda import (
 )
 from .i18n import t
 from .models import Line, Utterance
+from .preflight import unfinished_downloads, vad_filter_works
 from .settings import is_builtin_model, model_display
 from .status import Notifier
 from .transcript import TranscriptWriter
@@ -93,6 +94,17 @@ class TranscriberWorker(threading.Thread):
         self.device_label = ""
         self.model = None
         self._auto_fix_reported = False
+        # Жалуемся один раз: сбой записи повторяется на каждой фразе, а
+        # место в строке состояния одно.
+        self._write_failed = False
+        # Взведён, пока модель качается из сети. Отдельно от loading:
+        # «качаю 1.6 ГБ» и «открываю файл с диска» — это минуты против
+        # секунд, и в окне их нельзя показывать одной надписью.
+        self.downloading = threading.Event()
+        # Фильтр Silero берём из конфигурации, но снять его может проба на
+        # старте: в сломанном окружении он уносит процесс, см. _check_vad().
+        self.vad_filter = cfg.use_whisper_vad_filter
+        self._vad_checked = False
 
     # ------------------------------------------------------------------
 
@@ -199,7 +211,7 @@ class TranscriberWorker(threading.Thread):
                 t("asr.loading", model=model_display(model_name),
                   device=device, compute=compute)
             )
-            model = WhisperModel(model_name, device=device, compute_type=compute)
+            model = self._open(WhisperModel, model_name, device, compute)
         except Exception as exc:
             if device != "cuda":
                 raise
@@ -219,9 +231,63 @@ class TranscriberWorker(threading.Thread):
                 t("asr.loading", model=model_display(model_name),
                   device=device, compute=compute)
             )
-            model = WhisperModel(model_name, device=device, compute_type=compute)
+            model = self._open(WhisperModel, model_name, device, compute)
 
         return model, model_name, f"{model_display(model_name)} · {device}/{compute}"
+
+    def _open(self, WhisperModel, name: str, device: str, compute: str):
+        """Открыть модель: сначала из кэша, в сеть — только если её там нет.
+
+        faster-whisper по умолчанию идёт на Hugging Face при КАЖДОЙ
+        загрузке, даже когда модель давно лежит на диске
+        (local_files_only=False). Приложению, которое обещает работать
+        офлайн, это не нужно, и цена у похода не нулевая: при недоступном
+        или отвечающем через силу узле загрузка не отваливается с ошибкой,
+        а висит — окно показывает «Загружаю модель...» столько, сколько
+        HTTP-клиент готов ждать. Замерено на живой машине: двадцать минут
+        и ни одной строки наружу.
+        """
+        try:
+            return WhisperModel(name, device=device, compute_type=compute,
+                                local_files_only=True)
+        except Exception:
+            # В кэше модели нет или она там неполная — только теперь в сеть.
+            pass
+
+        self.notifier.info(t("asr.downloading", model=model_display(name)))
+        self.downloading.set()
+        try:
+            return WhisperModel(name, device=device, compute_type=compute)
+        except Exception:
+            # Оборванная загрузка оставляет .incomplete, и следующая
+            # попытка его НЕ продолжает. Сам по себе этот тупик не
+            # рассосётся, поэтому говорим, что именно удалить.
+            partials = unfinished_downloads()
+            if partials:
+                self.notifier.warn(t(
+                    "asr.download_partials",
+                    count=len(partials), path=str(partials[0].parent),
+                ))
+            raise
+        finally:
+            self.downloading.clear()
+
+    def _check_vad(self) -> None:
+        """Снять фильтр Silero, если в этом окружении он не жилец.
+
+        Проба идёт отдельным процессом и один раз за запуск: фильтр
+        считает onnxruntime, и на сломанном окружении он не бросает
+        исключение, а уносит процесс на первой же фразе — модель к тому
+        моменту загружена, в окне «Слушаю», и выглядит это как исчезнувшее
+        приложение. Дешевле спросить заранее.
+        """
+        if self._vad_checked or not self.vad_filter:
+            return
+        self._vad_checked = True
+        works, reason = vad_filter_works()
+        if not works:
+            self.vad_filter = False
+            self.notifier.warn(t("asr.vad_filter_off", reason=reason))
 
     def _load_model(self):
         found = prepare_cuda_dll_path()
@@ -274,6 +340,7 @@ class TranscriberWorker(threading.Thread):
                 ))
                 return
             self.model, self.device_label = model, label
+            self.failed.clear()
             self.model_setting.confirm(loaded)
             self.loading.clear()
             self.notifier.warn(t(
@@ -284,6 +351,10 @@ class TranscriberWorker(threading.Thread):
             return
 
         self.model, self.device_label = model, label
+        # Отказ снимаем здесь: модель в руках, а с взведённым failed поток
+        # молча выбрасывал бы каждую фразу — см. run(). Иначе удачная
+        # смена модели выглядела бы удачной, а приложение оставалось глухим.
+        self.failed.clear()
         self.model_setting.confirm(loaded)
         self.loading.clear()
         self.notifier.info(t("asr.model_switched", device=label))
@@ -297,7 +368,7 @@ class TranscriberWorker(threading.Thread):
             condition_on_previous_text=False,
             # Второй рубеж после webrtcvad: отсекает сегменты, где речи
             # на самом деле нет, до того как декодер начнёт фантазировать.
-            vad_filter=self.cfg.use_whisper_vad_filter,
+            vad_filter=self.vad_filter,
             vad_parameters={
                 "threshold": 0.35,
                 "min_silence_duration_ms": 300,
@@ -379,6 +450,7 @@ class TranscriberWorker(threading.Thread):
 
     def run(self) -> None:
         try:
+            self._check_vad()
             self.model = self._load_model()
         except Exception as exc:
             self.failed.set()
@@ -427,7 +499,20 @@ class TranscriberWorker(threading.Thread):
             line = Line(utt.ts, utt.label, text)
             # Сначала на диск, потом в окно: если что-то упадёт при отрисовке,
             # расшифровка всё равно уже сохранена.
-            self.writer.append(line)
+            #
+            # Но упасть может и сама запись — папка только для чтения, нет
+            # места, файл держит OneDrive. Раньше исключение отсюда уносило
+            # поток распознавания целиком: под pythonw трассировку печатать
+            # некуда, окно продолжало писать «Слушаю», очередь росла, и
+            # больше не появлялось ни строки. Живой текст важнее файла.
+            try:
+                self.writer.append(line)
+            except Exception as exc:
+                if not self._write_failed:
+                    self._write_failed = True
+                    self.notifier.warn(t(
+                        "asr.write_failed", error=f"{type(exc).__name__}: {exc}"
+                    ))
             self.gui_queue.put(line)
 
             elapsed = time.monotonic() - started

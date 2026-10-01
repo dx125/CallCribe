@@ -272,6 +272,15 @@ class TranscriptWindow:
             self.status_var.set(t("ui.paused"))
             return
 
+        # Скачивание показываем отдельной надписью: «Загружаю модель...»
+        # на полуторагигабайтной загрузке неотличимо от зависания, а под
+        # ярлыком (pythonw.exe) консоли с прогрессом нет.
+        if self.worker.downloading.is_set():
+            self.status_var.set(
+                t("ui.downloading", model=model_display(self.worker.loading_name))
+            )
+            return
+
         if self.worker.loading.is_set():
             name = self.worker.loading_name
             self.status_var.set(
